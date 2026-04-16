@@ -1,6 +1,7 @@
 # data / runs / binaries - never commit
-data/
-runs/
+# Anchor to repo root so this does NOT ignore bev_vawa/data/ (the source package).
+/data/
+/runs/
 *.pt
 *.ckpt
 *.npz

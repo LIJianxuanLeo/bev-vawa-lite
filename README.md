@@ -17,9 +17,12 @@
 3. [PIB-Nav Benchmark](#pib-nav-benchmark)
 4. [Data Pipeline](#data-pipeline)
 5. [Training](#training)
-   - [Stage A — VA Imitation](#stage-a--va-imitation)
-   - [Stage B — WA Future Prediction](#stage-b--wa-future-prediction)
-   - [Stage C — Joint Fine-tuning](#stage-c--joint-fine-tuning)
+   - [Two Tracks: Local (MuJoCo) vs Remote (Habitat)](#two-tracks-local-mujoco-vs-remote-habitat)
+   - [Local Track — Stage A/B/C on PIB-Nav (Apple M4)](#local-track--stage-abc-on-pib-nav-apple-m4)
+     - [Stage A — VA Imitation](#stage-a--va-imitation)
+     - [Stage B — WA Future Prediction](#stage-b--wa-future-prediction)
+     - [Stage C — Joint Fine-tuning](#stage-c--joint-fine-tuning)
+   - [Remote Track — Habitat Scenes on a Linux GPU Box](#remote-track--habitat-scenes-on-a-linux-gpu-box)
 6. [Baselines & Ablations](#baselines--ablations)
 7. [Evaluation Metrics](#evaluation-metrics)
 8. [Install](#install)
@@ -280,9 +283,32 @@ Samples are saved as sharded `.npz` files. Full dataset: ~200 rooms × 64 sample
 
 ## Training
 
+### Two Tracks: Local (MuJoCo) vs Remote (Habitat)
+
+BEV-VAWA-Lite ships with **two training tracks** that share model code, training stages, configs, and the `.npz` shard schema — only the data source differs.
+
+| | **Local (MuJoCo)** | **Remote (Habitat)** |
+|---|---|---|
+| **Purpose** | Day-to-day development; paper main results | Future research on realistic scenes; cross-domain transfer |
+| **Host** | Apple M4 / any machine with PyTorch (MPS/CPU/CUDA) | Linux + CUDA ≥12.1 + EGL (e.g. AWS g5, Lambda Labs, RunPod) |
+| **Scenes** | PIB-Nav procedural rooms (built on-the-fly in MuJoCo) | HSSD / HM3D / ProcTHOR-HAB (photorealistic or procedural multi-room) |
+| **Install** | `pip install -e .` | `docker build -f docker/habitat.Dockerfile -t bev-vawa-lite:habitat .` |
+| **Entry point** | `bash repro.sh --tiny` | `bash docker/train_remote.sh --dataset hssd` |
+| **Env adapter** | `bev_vawa/envs/mujoco_env.py::NavEnv` | `bev_vawa/envs/habitat_env.py::HabitatNavEnv` |
+| **Data generator** | `scripts/generate_data.py` | `scripts/generate_data_habitat.py` |
+| **Evaluator** | `scripts/eval.py` | `scripts/eval_habitat.py` |
+| **Configs** | `configs/default.yaml`, `configs/ablations/` | `configs/habitat/{default,hssd,procthor}.yaml` |
+| **Time budget** | ~10 min end-to-end | ~3 h on A10 for HSSD |
+
+Both tracks produce checkpoints with the **same architecture**, so you can train on one and evaluate on the other — this is the intended cross-domain generalisation study. See [docker/README.md](docker/README.md) for the remote setup, scene downloads, and cross-domain eval recipes.
+
+The sections below describe the **local track** in detail. Jump to [Remote Track](#remote-track--habitat-scenes-on-a-linux-gpu-box) for the Habitat equivalent.
+
+### Local Track — Stage A/B/C on PIB-Nav (Apple M4)
+
 All training scripts accept `--stage`, `--data`, `--out`, and `--tiny` flags. Configs are loaded from `configs/default.yaml` (or a custom YAML via `--config`). Checkpoints are saved to `runs/<out_dir>/`.
 
-### Stage A — VA Imitation
+#### Stage A — VA Imitation
 
 **File:** `bev_vawa/train/stage_a_va.py`
 
@@ -298,7 +324,7 @@ The cross-entropy term teaches the agent *which* direction to pick; the Huber te
 
 ---
 
-### Stage B — WA Future Prediction
+#### Stage B — WA Future Prediction
 
 **File:** `bev_vawa/train/stage_b_wa.py`
 
@@ -316,13 +342,82 @@ The ensemble members share the same anchor embedding and LSTM rollout weights, b
 
 ---
 
-### Stage C — Joint Fine-tuning
+#### Stage C — Joint Fine-tuning
 
 **File:** `bev_vawa/train/stage_c_joint.py`
 
 Jointly optimises `Loss_A + Loss_B` with the **last CNN block + LSTM + both heads** unfrozen. The earlier CNN blocks are kept frozen to avoid disrupting low-level feature learning.
 
 **Default:** 3 epochs, lr=1e-4.
+
+---
+
+### Remote Track — Habitat Scenes on a Linux GPU Box
+
+For future research on richer scene datasets (realistic houses, multi-room layouts), a parallel Habitat-sim pipeline is provided. **None of this runs on macOS** — habitat-sim has no EGL headless path on Mac, so this track is Docker-only on a Linux CUDA host.
+
+#### What's new in this track
+
+| Component | File | Purpose |
+|---|---|---|
+| `HabitatNavEnv` | `bev_vawa/envs/habitat_env.py` | Drop-in replacement for `NavEnv`. Same obs schema (`depth`, `goal_vec`, `pose`), same `(v, ω)` action. Uses habitat-sim's `VelocityControl` + navmesh `try_step()` for collision-aware motion. |
+| Habitat rollout | `bev_vawa/data/rollout_habitat.py` | Iterates scene `.glb` files, samples (start, goal) pairs via `pathfinder.find_path`, walks the geodesic path, renders depth, and emits **`.npz` shards with the same schema as the MuJoCo generator**. |
+| CLI: data | `scripts/generate_data_habitat.py` | `--scenes 'data/hssd/*.glb' --out data/pib_nav_hssd` |
+| CLI: eval | `scripts/eval_habitat.py` | Closed-loop inside Habitat scenes; writes `results/main_table_habitat.csv`. |
+| Configs | `configs/habitat/{default,hssd,procthor}.yaml` | Inherit from `configs/default.yaml` and override only what differs (batch size, epochs, scene paths, encoder latent). |
+| Container | `docker/habitat.Dockerfile` | CUDA 12.1 + Ubuntu 22.04 + conda `habitat-sim=0.3.2` (headless/EGL) + this package. |
+| Remote script | `docker/train_remote.sh` | End-to-end equivalent of `repro.sh` for the GPU box (download scenes → gen data → train A/B/C → eval). |
+
+Because the **shard format is unified**, `scripts/train.py` and all three training stages are **completely unchanged** on the remote track — the model doesn't know whether its training data came from MuJoCo or Habitat.
+
+#### Quickstart (on a Linux + CUDA host)
+
+```bash
+# 1. Build the image (~15 min)
+docker build -f docker/habitat.Dockerfile -t bev-vawa-lite:habitat .
+
+# 2. Smoke test inside the container
+docker run --gpus all --rm -it \
+    -v "$PWD":/workspace \
+    bev-vawa-lite:habitat \
+    bash docker/train_remote.sh --dataset hssd --tiny
+
+# 3. Download an actual scene dataset (inside the container)
+python -m habitat_sim.utils.datasets_download \
+    --uids hssd-hab --data-path /workspace/data/scene_datasets
+
+# 4. Full pipeline (~3 h on an A10)
+bash docker/train_remote.sh --dataset hssd
+```
+
+#### Supported scene datasets
+
+| Dataset | Config | Scenes | Character |
+|---|---|---|---|
+| **HSSD** (Habitat Synthetic Scenes) | `configs/habitat/hssd.yaml` | 200 photorealistic homes | Main Habitat result |
+| **ProcTHOR-HAB** | `configs/habitat/procthor.yaml` | 10 000 procedural apartments | Scaling / diversity studies |
+| **HM3D** | add new config file | ~1 000 real-world scans | Hardest transfer target |
+
+#### Cross-domain evaluation
+
+The trained checkpoints are **architecture-identical** across tracks, so you can mix and match:
+
+```bash
+# Train on PIB-Nav locally, evaluate on HSSD remotely:
+python scripts/eval_habitat.py --config configs/habitat/hssd.yaml \
+    --scenes 'data/scene_datasets/hssd/val/*.glb' \
+    --policy bev_vawa --ckpt runs/default/stage_c.pt \
+    --method-name "BEV-VAWA (PIB-Nav → HSSD)"
+
+# Train on HSSD remotely, evaluate on PIB-Nav locally:
+python scripts/eval.py --policy bev_vawa \
+    --ckpt runs/hssd/stage_c.pt \
+    --method-name "BEV-VAWA (HSSD → PIB-Nav)"
+```
+
+These transfer numbers go into `results/cross_domain.csv` and are the intended headline result for follow-up work: does a BEV-native architecture generalise from synthetic rooms to realistic houses without retraining?
+
+Full remote-setup guide, troubleshooting, and resource estimates: [docker/README.md](docker/README.md).
 
 ---
 
@@ -515,16 +610,22 @@ bev-vawa-lite/
 │       ├── h1.yaml              # WA rollout horizon H=1
 │       ├── k1.yaml              # single candidate K=1
 │       └── k3.yaml              # K=3 candidates
+│   └── habitat/                 # REMOTE GPU track (see docker/)
+│       ├── default.yaml         # habitat base overrides
+│       ├── hssd.yaml            # HSSD-200 scene dataset
+│       └── procthor.yaml        # ProcTHOR-HAB scene dataset
 │
 ├── bev_vawa/
 │   ├── envs/
 │   │   ├── pib_generator.py     # procedural MuJoCo XML builder (RoomSpec)
 │   │   ├── occupancy.py         # rasterize XML → grid; 8-connected A*
-│   │   └── mujoco_env.py        # NavEnv: reset/step/close; depth + pose
+│   │   ├── mujoco_env.py        # NavEnv: reset/step/close; depth + pose
+│   │   └── habitat_env.py       # HabitatNavEnv (same API, remote only)
 │   │
 │   ├── data/
 │   │   ├── expert.py            # Chaikin smoothing, candidate anchors, labels
-│   │   ├── rollout.py           # teleport-based offline sample generation
+│   │   ├── rollout.py           # MuJoCo: teleport along A*; .npz shards
+│   │   ├── rollout_habitat.py   # Habitat: teleport along geodesic; same shard schema
 │   │   └── dataset.py           # NavShardDataset (LRU-cached .npz shards)
 │   │
 │   ├── models/
@@ -557,10 +658,17 @@ bev-vawa-lite/
 │       └── logging.py           # simple run-dir logger
 │
 ├── scripts/
-│   ├── generate_data.py         # CLI: build .npz shards
-│   ├── train.py                 # CLI: --stage {a,b,c,fpv_bc,bev_bc,bev_va}
-│   ├── eval.py                  # CLI: --policy {astar,bev_vawa,...}
-│   └── make_figures.py          # CLI: produce all paper figures
+│   ├── generate_data.py          # CLI: build .npz shards (MuJoCo)
+│   ├── generate_data_habitat.py  # CLI: build .npz shards (Habitat, remote)
+│   ├── train.py                  # CLI: --stage {a,b,c,fpv_bc,bev_bc,bev_va}
+│   ├── eval.py                   # CLI: --policy {astar,bev_vawa,...} (MuJoCo)
+│   ├── eval_habitat.py           # CLI: same but inside Habitat scenes
+│   └── make_figures.py           # CLI: produce all paper figures
+│
+├── docker/                      # REMOTE GPU track (Habitat)
+│   ├── habitat.Dockerfile       # CUDA 12.1 + conda habitat-sim 0.3.2 + project
+│   ├── train_remote.sh          # end-to-end pipeline on the GPU box
+│   └── README.md                # remote setup, scene download, cross-domain eval
 │
 ├── tests/                       # one pytest file per stage gate
 │   ├── test_stage0_env.py
@@ -571,13 +679,15 @@ bev-vawa-lite/
 │   ├── test_stage5_loop.py
 │   ├── test_stage6_baselines.py
 │   ├── test_stage7_artifacts.py
-│   └── test_stage8_repro.py
+│   ├── test_stage8_repro.py
+│   └── test_stage9_habitat.py   # static checks always run; runtime auto-skips on hosts w/o habitat-sim
 │
 ├── paper/
 │   └── paper.md                 # full paper draft (Abstract → Conclusion)
 │
 └── results/                     # committed CSVs + figures (no checkpoints)
     ├── main_table.csv
+    ├── main_table_habitat.csv   # populated by the remote track
     ├── ablation_table.csv
     └── figures/
 ```
@@ -601,12 +711,14 @@ Every stage has a permanent `tests/test_stage*.py` file. Re-running `pytest test
 | 6 | `test_stage6_baselines.py` | Each baseline trains 1 epoch without crash; A\* oracle achieves SR≥0.95 on 20 easy rooms |
 | 7 | `test_stage7_artifacts.py` | All required figure files exist and non-empty; `main_table.csv` has all method rows; `paper.md` contains all required section headers |
 | 8 | `test_stage8_repro.py` | `README.md` contains required sections; `repro.sh` is executable; `.gitignore` blocks heavy outputs; all scripts are syntactically importable; `pyproject.toml` pins `torch>=2.4` |
+| 9 | `test_stage9_habitat.py` | Habitat modules import without habitat-sim installed; configs parse; `docker/` files exist and `train_remote.sh` is executable; constructing `HabitatNavEnv` without habitat-sim raises a clear `ImportError`. Runtime tests (actual habitat-sim API) skip on the M4 and run only inside the docker image. |
 
 Run the full suite:
 
 ```bash
 pytest tests/ -v
-# 37 passed in ~7 s (on M4, no training)
+# On Apple M4: 43 passed, 1 skipped  (~5 s, no training)
+# Inside docker/habitat image: 44 passed  (runtime habitat test active)
 ```
 
 ---

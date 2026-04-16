@@ -1,0 +1,63 @@
+# Habitat (remote GPU) default config.
+#
+# Inherits the laptop / MuJoCo defaults and overrides only the fields that
+# differ. The model architecture is unchanged — only the dataset source,
+# training budget, and habitat-specific knobs are touched.
+inherit: ../default.yaml
+
+seed: 42
+
+env:
+  # habitat scenes are richer than PIB-Nav rooms; let the agent move a bit
+  # more briskly and give it more episode budget.
+  max_lin_vel: 0.5
+  max_ang_vel: 1.5
+  control_dt: 0.1
+  depth_wh: [128, 128]
+  depth_fov_deg: 90
+  depth_max_m: 5.0
+  goal_tol_m: 0.25
+  max_collisions: 15
+  max_episode_steps: 500
+
+bev:
+  # larger receptive field for complex scenes
+  range_m: 8.0
+  latent_dim: 192
+
+va:
+  n_candidates: 5
+  waypoint_horizon_m: 1.5
+
+wa:
+  rollout_horizon: 3
+  ensemble: 3
+
+fusion:
+  alpha: 1.0
+  beta:  1.5
+  gamma: 2.5     # heavier safety term — habitat scenes have real clutter
+  delta: 0.5
+
+train:
+  batch_size: 128           # GPU can handle this
+  lr: 3.0e-4
+  epochs_stage_a: 20
+  epochs_stage_b: 20
+  epochs_stage_c: 8
+  num_workers: 4            # CUDA / linux: use real workers
+
+data:
+  out_dir: "data/pib_nav_habitat"
+
+habitat:
+  # override these per dataset (see hssd.yaml, procthor.yaml)
+  pairs_per_scene: 16
+  samples_per_pair: 8
+  agent_height_m: 1.0
+  gpu_device_id: 0
+  scene_dataset: "hssd"     # informational; pick via --scenes at CLI
+
+eval:
+  n_episodes: 200
+  results_dir: "results"

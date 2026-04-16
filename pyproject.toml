@@ -23,6 +23,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
+# Remote-only: install these on the Linux + CUDA + EGL box (e.g. inside the
+# image built from docker/habitat.Dockerfile). habitat-sim has no macOS EGL
+# path and is intentionally NOT part of the default install.
+habitat = [
+    # habitat-sim is best installed via conda-forge/aihabitat in docker.
+    # This extras group only pulls the pure-Python pieces that can live
+    # alongside habitat-sim once it's in the environment.
+    "habitat-lab>=0.3.2; platform_system == 'Linux'",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bev_vawa*"]

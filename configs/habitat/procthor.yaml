@@ -1,0 +1,32 @@
+# ProcTHOR-HAB overrides.
+#
+# ProcTHOR-HAB is procedurally generated multi-room apartments in the habitat
+# scene format. Sits between PIB-Nav (single room) and HSSD (realistic) in
+# complexity — a good middle rung for scaling studies.
+#
+# Scene download:
+#   python -m habitat_sim.utils.datasets_download \
+#       --uids procthor-hab-10k --data-path data/scene_datasets
+inherit: ./default.yaml
+
+env:
+  max_episode_steps: 600
+  depth_max_m: 5.0
+
+bev:
+  range_m: 8.0
+  latent_dim: 192
+
+habitat:
+  scene_dataset: "procthor"
+  pairs_per_scene: 20
+  samples_per_pair: 10
+  agent_height_m: 1.1
+
+train:
+  epochs_stage_a: 25
+  epochs_stage_b: 25
+  epochs_stage_c: 8
+
+data:
+  out_dir: "data/pib_nav_procthor"
