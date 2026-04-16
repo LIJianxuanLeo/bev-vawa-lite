@@ -1,0 +1,3 @@
+inherit: ../default.yaml
+fusion:
+  delta: 0.0

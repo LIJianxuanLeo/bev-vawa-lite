@@ -1,0 +1,6 @@
+inherit: ../default.yaml
+fusion:
+  alpha: 1.0
+  beta: 0.0
+  gamma: 0.0
+  delta: 0.0

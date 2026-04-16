@@ -1,0 +1,60 @@
+# Default experiment config for BEV-VAWA-Lite.
+seed: 42
+
+env:
+  room_size_m: [5.0, 7.0]   # uniform range
+  n_obstacles: [3, 6]
+  obstacle_size_m: [0.4, 1.2]
+  wall_height_m: 0.8
+  robot_radius_m: 0.20
+  max_lin_vel: 0.4
+  max_ang_vel: 1.2
+  control_dt: 0.1
+  depth_wh: [128, 128]
+  depth_fov_deg: 90
+  depth_max_m: 3.0
+  occupancy_cell_m: 0.05
+  goal_tol_m: 0.25
+  max_collisions: 10
+  max_episode_steps: 300
+
+bev:
+  grid_size: 64
+  range_m: 6.0         # BEV covers 6m x 6m in front of robot
+  latent_dim: 128
+  cnn_channels: [32, 64, 96]
+  recurrent: "lstm"    # lstm is faster than gru on mps
+
+va:
+  n_candidates: 5
+  waypoint_horizon_m: 1.5
+
+wa:
+  rollout_horizon: 3
+  waypoint_embed_dim: 16
+  ensemble: 3          # for uncertainty estimate
+
+fusion:
+  alpha: 1.0           # policy score
+  beta: 1.5            # progress
+  gamma: 2.0           # risk
+  delta: 0.5           # uncertainty
+
+train:
+  batch_size: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  epochs_stage_a: 6
+  epochs_stage_b: 6
+  epochs_stage_c: 3
+  grad_clip: 1.0
+  num_workers: 0       # keep low on MPS
+
+data:
+  n_rooms: 200
+  samples_per_room: 64
+  out_dir: "data/pib_nav"
+
+eval:
+  n_episodes: 100
+  results_dir: "results"

@@ -1,0 +1,27 @@
+# data / runs / binaries - never commit
+data/
+runs/
+*.pt
+*.ckpt
+*.npz
+*.mp4
+*.gif
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+build/
+dist/
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+
+# mujoco runtime
+MUJOCO_LOG.TXT
