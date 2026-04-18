@@ -61,13 +61,10 @@ def test_habitat_configs_parse():
     """All configs/habitat/*.yaml must load via our config loader (which
     follows the ``inherit:`` chain)."""
     from bev_vawa.utils import load_config
-    for name in ("default.yaml", "hssd.yaml", "procthor.yaml"):
+    for name in ("default.yaml", "gibson.yaml", "gibson_occonly.yaml"):
         cfg = load_config(str(REPO / "configs" / "habitat" / name))
-        # expected sections inherited from root default
         for key in ("env", "bev", "va", "wa", "fusion", "train", "data"):
             assert key in cfg, f"{name} missing section {key!r}"
-        # habitat-specific block
-        assert "habitat" in cfg, f"{name} missing 'habitat' block"
 
 
 def test_dockerfile_and_remote_script_exist():

@@ -1,4 +1,4 @@
-# Default experiment config for BEV-VAWA-Lite.
+# Default experiment config for BEV-VAWA-Lite (local PIB-Nav, MuJoCo).
 seed: 42
 
 env:
@@ -18,12 +18,18 @@ env:
   max_collisions: 10
   max_episode_steps: 300
 
+# Geometric multi-channel BEV (occ + free + goal-prior). ``channels_enabled``
+# gates the three channels at lift time for ablations.
 bev:
   grid_size: 64
-  range_m: 6.0         # BEV covers 6m x 6m in front of robot
+  range: [0.0, 3.0, -1.5, 1.5]   # (x_min, x_max, y_min, y_max) in meters
+  fov_deg: 90
+  depth_max_m: 3.0
   latent_dim: 128
   cnn_channels: [32, 64, 96]
-  recurrent: "lstm"    # lstm is faster than gru on mps
+  recurrent: "lstm"              # lstm is faster than gru on mps
+  channels_enabled: [1, 1, 1]
+  goal_sector_sigma_rad: 0.35
 
 va:
   n_candidates: 5
@@ -32,13 +38,18 @@ va:
 wa:
   rollout_horizon: 3
   waypoint_embed_dim: 16
-  ensemble: 3          # for uncertainty estimate
+  ensemble: 3                    # for uncertainty estimate
+  enable_dyn: true               # L_dyn: align rollout latents to encoder futures
+  enable_deadend: true           # L_deadend: per-candidate reachability BCE
+  lambda_dyn: 0.5
+  lambda_deadend: 0.5
 
 fusion:
-  alpha: 1.0           # policy score
-  beta: 1.5            # progress
-  gamma: 2.0           # risk
-  delta: 0.5           # uncertainty
+  alpha: 1.0                     # policy score
+  beta: 1.5                      # progress
+  gamma: 2.0                     # risk
+  delta: 0.5                     # uncertainty
+  eta: 1.0                       # dead-end penalty
 
 train:
   batch_size: 64
@@ -48,7 +59,7 @@ train:
   epochs_stage_b: 6
   epochs_stage_c: 3
   grad_clip: 1.0
-  num_workers: 0       # keep low on MPS
+  num_workers: 0                 # keep low on MPS
 
 data:
   n_rooms: 200

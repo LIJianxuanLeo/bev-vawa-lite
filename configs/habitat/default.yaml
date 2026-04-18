@@ -20,11 +20,6 @@ env:
   max_collisions: 15
   max_episode_steps: 500
 
-bev:
-  # larger receptive field for complex scenes
-  range_m: 8.0
-  latent_dim: 192
-
 va:
   n_candidates: 5
   waypoint_horizon_m: 1.5
@@ -38,6 +33,7 @@ fusion:
   beta:  1.5
   gamma: 2.5     # heavier safety term — habitat scenes have real clutter
   delta: 0.5
+  eta:   1.0
 
 train:
   batch_size: 128           # GPU can handle this
@@ -51,12 +47,8 @@ data:
   out_dir: "data/pib_nav_habitat"
 
 habitat:
-  # override these per dataset (see hssd.yaml, procthor.yaml)
-  pairs_per_scene: 16
-  samples_per_pair: 8
   agent_height_m: 1.0
   gpu_device_id: 0
-  scene_dataset: "hssd"     # informational; pick via --scenes at CLI
 
 eval:
   n_episodes: 200

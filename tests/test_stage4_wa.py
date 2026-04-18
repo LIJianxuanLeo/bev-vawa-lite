@@ -14,8 +14,16 @@ def test_fusion_argmax():
     risk = torch.tensor([[-5.0, 5.0, -5.0, -5.0, -5.0]])   # anchor 1 is risky
     prog = torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0]])
     unc = torch.tensor([[0.0, 0.2, 0.0, 0.0, 0.0]])
-    Q = fuse_scores(va, risk, prog, unc, alpha=1, beta=1, gamma=2, delta=0.5)
+    dead = torch.zeros_like(va)
+    Q = fuse_scores(va, risk, prog, unc, dead,
+                    alpha=1, beta=1, gamma=2, delta=0.5, eta=1.0)
     assert int(Q.argmax(dim=-1).item()) != 1  # penalized away from risky anchor
+
+    # dead-end term penalizes anchor 2
+    dead2 = torch.tensor([[0.0, 0.0, 5.0, 0.0, 0.0]])
+    Q2 = fuse_scores(va, torch.zeros_like(risk), prog, unc, dead2,
+                     alpha=1, beta=1, gamma=0, delta=0, eta=2.0)
+    assert int(Q2.argmax(dim=-1).item()) != 2
 
 
 def test_stage_b_smoke(tmp_path):

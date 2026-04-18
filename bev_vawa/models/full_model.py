@@ -1,6 +1,15 @@
-"""End-to-end BEV-VAWA model: encoder + VA + WA + fusion."""
+"""End-to-end BEV-VAWA model: geometric BEV encoder + VA head + WA head + fusion.
+
+Public API:
+  * ``forward(depth, goal, use_wa=True, future_depth=None, future_goal=None) -> dict``
+  * ``encode_future(future_depth, future_goal) -> (B, H, latent)`` — no-grad,
+    used by the trainer to produce the dynamics target ``z_gt_future``.
+  * ``select_waypoint(out, fusion_cfg) -> (wp, k_star)`` — fuse candidate
+    scores and pick the best k at inference time.
+"""
 from __future__ import annotations
 from typing import Optional
+
 import torch
 from torch import nn
 
@@ -16,32 +25,50 @@ class BEVVAWA(nn.Module):
         bev = cfg["bev"]
         va = cfg["va"]
         wa = cfg["wa"]
+        env = cfg["env"]
         self.cfg = cfg
+
+        channels_enabled = tuple(bev.get("channels_enabled", (1, 1, 1)))
+        bev_range = tuple(bev.get("range", (0.0, 3.0, -1.5, 1.5)))
+        goal_sigma = float(bev.get("goal_sector_sigma_rad", 0.35))
+
         self.encoder = BEVEncoder(
-            depth_wh=tuple(cfg["env"]["depth_wh"]),
+            depth_wh=tuple(env["depth_wh"]),
             grid_size=bev["grid_size"],
             latent_dim=bev["latent_dim"],
             cnn_channels=tuple(bev["cnn_channels"]),
-            recurrent=bev["recurrent"],
+            recurrent=bev.get("recurrent", "lstm"),
+            fov_deg=float(env["depth_fov_deg"]),
+            depth_max_m=float(env["depth_max_m"]),
+            bev_range=bev_range,
+            channels_enabled=channels_enabled,
+            goal_sector_sigma_rad=goal_sigma,
         )
         self.va = VAHead(latent_dim=bev["latent_dim"], n_candidates=va["n_candidates"])
         self.wa = WAHead(
-            latent_dim=bev["latent_dim"], n_candidates=va["n_candidates"],
-            waypoint_embed_dim=wa["waypoint_embed_dim"],
+            latent_dim=bev["latent_dim"],
+            n_candidates=va["n_candidates"],
+            waypoint_embed_dim=wa.get("waypoint_embed_dim", 16),
             rollout_horizon=wa["rollout_horizon"],
             ensemble=wa["ensemble"],
         )
-        # register anchors as buffer so they move with the model device
+
         from ..data.expert import candidate_anchors
         anchors = candidate_anchors(va["n_candidates"], va["waypoint_horizon_m"])
         self.register_buffer("anchors", torch.from_numpy(anchors), persistent=False)
 
     # ------------------------------------------------------------------
-    def forward(self, depth: torch.Tensor, goal: torch.Tensor, use_wa: bool = True) -> dict:
-        z = self.encoder(depth, goal)                                 # (B, latent)
+    def forward(
+        self,
+        depth: torch.Tensor,
+        goal: torch.Tensor,
+        use_wa: bool = True,
+        future_depth: Optional[torch.Tensor] = None,
+        future_goal: Optional[torch.Tensor] = None,
+    ) -> dict:
+        z = self.encoder(depth, goal)
         va_out = self.va(z)
         B = z.shape[0]
-        # resolved candidate waypoints in robot frame: anchors (+ optional learned offset)
         anchors = self.anchors.to(z.dtype).unsqueeze(0).expand(B, -1, -1)
         if "offset" in va_out:
             waypoints = anchors + va_out["offset"]
@@ -55,19 +82,58 @@ class BEVVAWA(nn.Module):
                 "wa_progress": wa_out["progress"],
                 "wa_unc": wa_out["uncertainty"],
                 "risk_ensemble": wa_out["risk_ensemble"],
+                "z_hat": wa_out["z_hat"],
+                "deadend_logit": wa_out["deadend_logit"],
             })
+        if future_depth is not None and future_goal is not None:
+            out["z_gt_future"] = self.encode_future(future_depth, future_goal)
         return out
 
-    def select_waypoint(self, out: dict, fusion_cfg: Optional[dict] = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Given a forward() output, return (selected_waypoint (B, 2), selected_k (B,))."""
+    @torch.no_grad()
+    def encode_future(self, future_depth: torch.Tensor,
+                      future_goal: torch.Tensor) -> torch.Tensor:
+        """Run the encoder (no-grad) on each future step to produce the
+        dynamics target for the WA ``L_dyn`` loss.
+
+        Parameters
+        ----------
+        future_depth : (B, H, 1, Hi, Wi)
+        future_goal  : (B, H, 2)
+
+        Returns
+        -------
+        z_future : (B, H, latent)
+        """
+        assert future_depth.dim() == 5, f"expected (B,H,1,Hi,Wi), got {tuple(future_depth.shape)}"
+        B, H, _, Hi, Wi = future_depth.shape
+        flat_d = future_depth.reshape(B * H, 1, Hi, Wi)
+        flat_g = future_goal.reshape(B * H, 2)
+        z = self.encoder.encode_single(flat_d, flat_g)       # (B*H, latent)
+        return z.view(B, H, -1)
+
+    # ------------------------------------------------------------------
+    def select_waypoint(self, out: dict, fusion_cfg: Optional[dict] = None
+                        ) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = fusion_cfg or self.cfg["fusion"]
-        if "wa_risk_logit" in out:
+        eta = float(cfg.get("eta", 1.0))
+        if "wa_risk_logit" in out and "deadend_logit" in out:
             Q = fuse_scores(
-                out["va_logits"], out["wa_risk_logit"], out["wa_progress"], out["wa_unc"],
-                alpha=cfg["alpha"], beta=cfg["beta"], gamma=cfg["gamma"], delta=cfg["delta"],
+                out["va_logits"], out["wa_risk_logit"], out["wa_progress"],
+                out["wa_unc"], out["deadend_logit"],
+                alpha=cfg["alpha"], beta=cfg["beta"], gamma=cfg["gamma"],
+                delta=cfg["delta"], eta=eta,
+            )
+        elif "wa_risk_logit" in out:
+            # WA was run without the dead-end branch — fall back to zero dead-end
+            zero_dead = torch.zeros_like(out["wa_risk_logit"])
+            Q = fuse_scores(
+                out["va_logits"], out["wa_risk_logit"], out["wa_progress"],
+                out["wa_unc"], zero_dead,
+                alpha=cfg["alpha"], beta=cfg["beta"], gamma=cfg["gamma"],
+                delta=cfg["delta"], eta=0.0,
             )
         else:
             Q = out["va_logits"]
-        k_star = Q.argmax(dim=-1)                                     # (B,)
+        k_star = Q.argmax(dim=-1)
         wp = out["waypoints"].gather(1, k_star.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
         return wp, k_star

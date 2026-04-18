@@ -1,0 +1,79 @@
+# Gibson PointNav v2 — Habitat (remote GPU) track.
+#
+# Geometric multi-channel BEV (occ + free-space + goal-prior) + WA head with
+# latent dynamics (L_dyn) and dead-end reachability estimation.
+#
+# Inherits the Habitat defaults (which in turn inherit the local defaults).
+inherit: ./default.yaml
+
+seed: 42
+
+dataset:
+  name: gibson
+  scene_dir: data/scene_datasets/gibson
+  episode_dir: data/datasets/pointnav/gibson/v2
+  split: train
+
+env:
+  depth_wh: [128, 128]
+  depth_fov_deg: 90
+  depth_max_m: 5.0
+  goal_tol_m: 0.25
+  max_episode_steps: 500
+
+# channels_enabled gates (occ, free, goal_prior) at lift time so the
+# occupancy-only ablation (gibson_occonly.yaml) is a config-only change.
+bev:
+  grid_size: 64
+  latent_dim: 128
+  cnn_channels: [32, 64, 96]
+  recurrent: "lstm"
+  range: [0.0, 3.0, -1.5, 1.5]   # (x_min, x_max, y_min, y_max) in meters
+  fov_deg: 90
+  depth_max_m: 5.0
+  channels_enabled: [1, 1, 1]
+  goal_sector_sigma_rad: 0.35
+
+wa:
+  rollout_horizon: 3
+  waypoint_embed_dim: 16
+  ensemble: 3
+  enable_dyn: true
+  enable_deadend: true
+  lambda_dyn: 0.5
+  lambda_deadend: 0.5
+
+fusion:
+  alpha: 1.0
+  beta:  1.5
+  gamma: 2.5
+  delta: 0.5
+  eta:   1.0            # dead-end penalty weight in fuse_scores
+
+train:
+  batch_size: 128
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  epochs_stage_a: 20
+  epochs_stage_b: 20
+  epochs_stage_c: 8
+  grad_clip: 1.0
+  num_workers: 4
+
+gibson:
+  samples_per_episode: 16
+  rollout_horizon: 3            # future-frame lookahead (must match wa.rollout_horizon)
+  max_episodes_per_scene: null  # unlimited
+  scene_limit: null             # unlimited
+
+data:
+  out_dir: "data/gibson_pointnav_v2_shards"
+
+habitat:
+  agent_height_m: 0.88          # Gibson default for LocobotAgent
+  gpu_device_id: 0
+  scene_dataset: "gibson"
+
+eval:
+  n_episodes: 200
+  results_dir: "results"

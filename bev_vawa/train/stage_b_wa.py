@@ -5,9 +5,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from ..data.dataset import NavShardDataset
-from ..models import BEVVAWA
 from ..utils import get_device, get_logger, set_seed
-from .losses import wa_loss
+from ._common import build_model, wa_loss_for_stage
 
 log = get_logger(__name__)
 
@@ -24,7 +23,7 @@ def train_stage_b(cfg: dict, data_dir: str, in_ckpt: str, out_ckpt: str,
     dl = DataLoader(ds, batch_size=cfg["train"]["batch_size"], shuffle=True,
                     num_workers=cfg["train"]["num_workers"])
 
-    model = BEVVAWA(cfg).to(device)
+    model = build_model(cfg).to(device)
     state = torch.load(in_ckpt, map_location=device, weights_only=False)
     model.load_state_dict(state["model"], strict=False)
 
@@ -44,7 +43,7 @@ def train_stage_b(cfg: dict, data_dir: str, in_ckpt: str, out_ckpt: str,
         for bi, batch in enumerate(dl):
             batch = _to_device(batch, device)
             out = model(batch["depth"], batch["goal"], use_wa=True)
-            loss = wa_loss(out, batch)
+            loss = wa_loss_for_stage(cfg, model, out, batch, stage="b")
             opt.zero_grad(set_to_none=True)
             loss["loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.wa.parameters(), cfg["train"]["grad_clip"])

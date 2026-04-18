@@ -1,17 +1,23 @@
-# Remote Habitat Training
+# Remote Habitat Training — Gibson PointNav v2
 
-This directory contains everything needed to run the **Habitat-sim track** of
-BEV-VAWA-Lite on a Linux GPU host. The local Apple M4 workflow in the repo
-root (`repro.sh`, `configs/default.yaml`) is untouched — the remote track is
-purely additive for follow-up research on realistic 3D scene datasets.
+This directory contains everything needed to run the **remote track** of
+BEV-VAWA-Lite on a Linux GPU host using Habitat-sim on the Gibson
+PointNav v2 episode pack. The local MuJoCo workflow at the repo root
+(`repro.sh`, `configs/default.yaml`) is untouched — the two tracks share
+the same `BEVVAWA` model and Stage A/B/C trainer, they only differ in
+which simulator drives the data-gen and closed-loop eval.
 
-| Track | Where it runs | What it trains on | Entry point |
-|---|---|---|---|
-| **Local (MuJoCo)** | Apple M4 / CPU / MPS | PIB-Nav procedural rooms | `bash repro.sh --tiny` |
-| **Remote (Habitat)** | Linux + CUDA + EGL | HSSD / HM3D / ProcTHOR-HAB | `bash docker/train_remote.sh --dataset hssd` |
+| Track | Simulator | Dataset | Host | Entry point |
+|---|---|---|---|---|
+| **Local** | MuJoCo | PIB-Nav (procedural) | Apple M4 / CPU / MPS | `bash repro.sh` |
+| **Remote** | Habitat-sim | Gibson PointNav v2 | Linux + CUDA | `bash docker/train_remote.sh` |
 
-Both tracks share **the same model code, training stages, config grammar,
-and shard schema** — only the simulator and scene dataset differ.
+Gibson shards are written in **schema v2** (adds `future_depth`,
+`future_goal`, `cand_deadend`, `schema_version: 2`), which feeds the WA
+head's `L_dyn` (latent-dynamics alignment) and `L_deadend` (reachability)
+losses. When shards lack those keys — e.g. local MuJoCo rollouts — the
+two losses degrade to zero automatically and the WA head falls back to
+the classical risk + progress supervision.
 
 ---
 
@@ -19,13 +25,13 @@ and shard schema** — only the simulator and scene dataset differ.
 
 | Component | Minimum | Recommended |
 |---|---|---|
-| GPU | NVIDIA CUDA 12.1, ≥12 GB VRAM | A10 / A100 / RTX 4090 |
+| GPU | NVIDIA CUDA 12.1, ≥ 12 GB VRAM | A10 / A100 / L4 / RTX 4090 |
 | OS | Ubuntu 22.04 (via Docker) | same |
-| Disk | 80 GB (scenes + shards + checkpoints) | 250 GB for HSSD full |
+| Disk | 60 GB (Gibson scenes + v2 shards + checkpoints) | 120 GB |
 | Docker | Docker 24+ with the NVIDIA Container Toolkit | |
 
-macOS is **not** supported for this track — habitat-sim has no EGL headless
-path on macOS. If you only have a Mac, run the local MuJoCo track instead.
+macOS is **not** supported here — habitat-sim has no EGL headless path on
+macOS. Use the MuJoCo track at the repo root instead.
 
 ---
 
@@ -37,40 +43,43 @@ From the repo root:
 docker build -f docker/habitat.Dockerfile -t bev-vawa-lite:habitat .
 ```
 
-The build step takes ~15 min (conda installing habitat-sim is the slow part).
-The resulting image is ~8 GB.
-
-**Verification** — the Dockerfile's final step runs an import check; if the
-build succeeds you already know that `torch.cuda.is_available() == True` and
+Build takes ~15 min (conda-installing habitat-sim is the slow part). The
+resulting image is ~8 GB. The final `RUN` step does an import check, so
+a successful build implies `torch.cuda.is_available() == True` and
 `habitat_sim` imports cleanly inside the container.
 
 ---
 
-## 3. Download scene datasets
+## 3. Download scene assets
 
-Scene assets are **not** shipped with the repo. Inside the running container:
+Gibson scenes and PointNav v2 episodes are gated on Stanford's aihabitat
+mirror and require a **one-time EULA** acceptance at
+<https://aihabitat.org/datasets/gibson/>. After that, inside the
+running container:
 
 ```bash
-# Inside container (after `docker run --gpus all -it bev-vawa-lite:habitat`):
+docker run --gpus all --rm -it \
+    -v "$PWD":/workspace \
+    bev-vawa-lite:habitat bash
 
-# HSSD (Habitat Synthetic Scenes Dataset, 200 scenes, ~20 GB)
+# Gibson scene meshes (.glb)
 python -m habitat_sim.utils.datasets_download \
-    --uids hssd-hab \
+    --uids gibson \
     --data-path /workspace/data/scene_datasets
 
-# OR ProcTHOR-HAB (10k procedural apartments, smaller per-scene but more scenes)
+# PointNav v2 episodes (.json.gz)
 python -m habitat_sim.utils.datasets_download \
-    --uids procthor-hab-10k \
-    --data-path /workspace/data/scene_datasets
+    --uids pointnav_gibson_v2 \
+    --data-path /workspace/data
 
-# OR HM3D (photorealistic, requires Matterport licence acceptance first)
-python -m habitat_sim.utils.datasets_download \
-    --uids hm3d_train_v0.2 hm3d_val_v0.2 \
-    --data-path /workspace/data/scene_datasets
+# Result:
+#   /workspace/data/scene_datasets/gibson/*.glb                         (scenes)
+#   /workspace/data/datasets/pointnav/gibson/v2/{train,val}/*.json.gz   (episodes)
 ```
 
-HSSD and HM3D are gated on HuggingFace / Matterport and require a token;
-follow the habitat-lab docs for credentials.
+The loader at `bev_vawa/data/gibson_episodes.py::iter_episodes`
+understands both the flat `{split}/{split}.json.gz` layout and the
+per-scene `{split}/content/*.json.gz` layout that the v2 val split uses.
 
 ---
 
@@ -83,71 +92,82 @@ docker run --gpus all --rm -it \
     -v "$PWD/runs":/workspace/runs \
     -v "$PWD/results":/workspace/results \
     bev-vawa-lite:habitat \
-    bash docker/train_remote.sh --dataset hssd
+    bash docker/train_remote.sh
 ```
 
-This runs inside the container:
+`train_remote.sh` runs, in order, inside the container:
 
-1. Dependency sanity check (`torch.cuda`, `habitat_sim.__version__`).
-2. Regenerate `.npz` shards from HSSD scenes with `generate_data_habitat.py`.
-3. Stage A → B → C training with `train.py` (unchanged, reads shards).
-4. Closed-loop evaluation on the val split with `eval_habitat.py`.
-5. CSV row appended to `results/main_table_habitat.csv`.
+1. Sanity: `torch.cuda` + `habitat_sim` import check.
+2. Pytest static gates.
+3. Schema-v2 shard generation for `train` + `val` splits via
+   `scripts/generate_data_habitat.py`.
+4. Stage A → Stage B → Stage C via the unified `scripts/train.py`.
+5. Closed-loop eval on the val split via `scripts/eval_habitat.py`,
+   appending a row to `results/main_table_habitat.csv`.
 
-**Smoke test first:** always run `--tiny` once to validate the environment
+**Smoke test first.** Always run `--tiny` once to validate the environment
 before kicking off a full training run:
 
 ```bash
-bash docker/train_remote.sh --dataset hssd --tiny
+bash docker/train_remote.sh --tiny
 ```
 
-Tiny mode uses 1 scene × 2 pairs × 4 samples, 1 training epoch with 3 batches,
-and 5 eval episodes — finishes in under 2 minutes on an A10.
+Tiny mode uses 2 scenes × 2 episodes × 2 samples, 1 training epoch with a
+handful of batches, and 5 eval episodes — finishes in under 5 minutes on
+an A10.
 
 ---
 
 ## 5. Expected resource usage
 
-Rough measurements on a single A10 (24 GB VRAM):
+Rough measurements on a single A10 (24 GB VRAM), ~60 Gibson train scenes:
 
-| Phase | HSSD (full) | ProcTHOR-HAB (10k) |
+| Phase | Time | Notes |
 |---|---|---|
-| Data generation | ~40 min (200 scenes × 24 pairs × 12 steps) | ~2 h (10k scenes × 4 pairs × 4 steps) |
-| Stage A (30 epochs) | ~50 min | ~4 h |
-| Stage B (30 epochs) | ~50 min | ~4 h |
-| Stage C (10 epochs) | ~20 min | ~1.5 h |
-| Evaluation (200 eps) | ~30 min | ~30 min |
-| **Total** | **~3 h** | **~12 h** |
+| Data generation | ~1 h | Includes H=3 future-depth capture (teleport-forward, render, teleport-back) for `L_dyn`. |
+| Stage A (20 epochs) | ~40 min | Encoder + VA head only. |
+| Stage B (20 epochs) | ~50 min | Encoder frozen; WA head with `L_dyn` + `L_deadend` supervision. |
+| Stage C (8 epochs) | ~25 min | Unfreeze `bev_pool` / `fc_pool` / `input_proj`; `λ_dyn` / `λ_deadend` × 0.4. |
+| Evaluation (200 eps) | ~30 min | Closed loop in Habitat. |
+| **Total** | **~3.5 h** | |
 
-The dataset size is the main driver. VRAM usage peaks at ~10 GB during
-training (batch 128, depth 128×128, encoder latent 192).
+VRAM peaks at ~8 GB (batch 128, depth 128 × 128, latent 128, plus the
+no-grad encoder pass over future frames).
+
+Data-gen dominates because each sampled step also renders an `H`-step
+future-depth stack. Knobs in `configs/habitat/gibson.yaml`:
+
+- `gibson.samples_per_episode` — how many samples to take per expert path.
+- `gibson.rollout_horizon` — `H` for future-depth capture (must match
+  `wa.rollout_horizon`; default 3).
+- `gibson.max_episodes_per_scene` / `gibson.scene_limit` — caps for quick
+  debugging or paper-scale runs.
 
 ---
 
 ## 6. Cross-domain evaluation
 
-The trained checkpoints are architecture-identical to the MuJoCo-trained
-ones, so you can cross-evaluate:
+Because the local and remote tracks share the same `BEVVAWA` model,
+checkpoints transfer between them:
 
 ```bash
-# HSSD-trained model, evaluated on PIB-Nav (laptop, MuJoCo)
+# Gibson-trained model, evaluated on PIB-Nav (MuJoCo)
 python scripts/eval.py --config configs/default.yaml \
     --policy bev_vawa \
-    --ckpt   runs/hssd/stage_c.pt \
-    --method-name "BEV-VAWA (HSSD → PIB-Nav)"
+    --ckpt   runs/gibson/stage_c.pt \
+    --method-name "BEV-VAWA (Gibson → PIB-Nav)"
 
-# PIB-Nav-trained model, evaluated on HSSD (remote, Habitat)
-python scripts/eval_habitat.py --config configs/habitat/hssd.yaml \
-    --scenes data/scene_datasets/hssd/val/*.glb \
+# PIB-Nav-trained model, evaluated on Gibson (Habitat)
+python scripts/eval_habitat.py --config configs/habitat/gibson.yaml \
+    --scenes 'data/scene_datasets/gibson/*.glb' \
     --policy bev_vawa \
     --ckpt   runs/default/stage_c.pt \
-    --method-name "BEV-VAWA (PIB-Nav → HSSD)"
+    --method-name "BEV-VAWA (PIB-Nav → Gibson)"
 ```
 
-The transfer numbers go into `results/cross_domain.csv` and are the intended
-headline result for the follow-up paper — they test whether a BEV-native
-architecture generalises from synthetic rooms to photorealistic scenes
-without retraining.
+Both writers append to `results/main_table_habitat.csv` (Habitat side)
+and `results/main_table.csv` (MuJoCo side), so cross-domain tables are a
+simple pandas read.
 
 ---
 
@@ -155,19 +175,30 @@ without retraining.
 
 ```
 docker/
-├── habitat.Dockerfile   # CUDA 12.1 + conda habitat-sim 0.3.2 + bev_vawa
-├── train_remote.sh      # end-to-end pipeline (data → train → eval)
-└── README.md            # this file
+├── habitat.Dockerfile   CUDA 12.1 + conda habitat-sim 0.3.2 + bev_vawa
+├── train_remote.sh      end-to-end Gibson pipeline (data → train → eval)
+└── README.md            this file
 
-bev_vawa/envs/habitat_env.py        # HabitatNavEnv (drop-in for NavEnv)
-bev_vawa/data/rollout_habitat.py    # habitat shard generator (same schema)
-scripts/generate_data_habitat.py    # CLI for the above
-scripts/eval_habitat.py             # closed-loop eval inside habitat scenes
+bev_vawa/
+├── envs/habitat_env.py           HabitatNavEnv (drop-in for the MuJoCo env)
+├── data/rollout_habitat.py       Habitat shard generator (schema v2)
+├── data/gibson_episodes.py       PointNav v2 episode loader (.json.gz)
+└── models/                       shared geometry-aware BEV + WA head
+
+scripts/
+├── generate_data_habitat.py      CLI wrapper for rollout_habitat
+└── eval_habitat.py               closed-loop eval inside Habitat scenes
+
 configs/habitat/
-├── default.yaml         # base habitat overrides
-├── hssd.yaml            # HSSD-specific
-└── procthor.yaml        # ProcTHOR-HAB-specific
-tests/test_stage9_habitat.py   # stage gate (auto-skips on hosts w/o habitat-sim)
+├── default.yaml                  base habitat overrides
+├── gibson.yaml                   Gibson PointNav v2 config
+└── gibson_occonly.yaml           ablation: BEV occupancy channel only
+
+tests/
+├── test_stage9_habitat.py        habitat scaffolding compiles (auto-skip without sim)
+├── test_stage10_bev_encoder.py   geometry-lift + encoder shapes / gradients
+├── test_stage11_wa_head.py       WA head + L_dyn + L_deadend losses
+└── test_stage12_gibson.py        Gibson episode loader + schema-v2 wiring
 ```
 
 ---
@@ -176,8 +207,9 @@ tests/test_stage9_habitat.py   # stage gate (auto-skips on hosts w/o habitat-sim
 
 | Symptom | Cause / fix |
 |---|---|
-| `ImportError: habitat-sim is not available` | You ran habitat code outside the docker image. Either rebuild/relaunch the container, or restrict yourself to the MuJoCo track on this host. |
-| `no navmesh loaded for scene ...` | The scene .glb has no corresponding `.navmesh`. Recompute with `sim.recompute_navmesh(habitat_sim.NavMeshSettings())`, or use HSSD/HM3D scenes that ship with navmeshes. |
+| `ImportError: habitat-sim is not available` | You ran habitat code outside the docker image. Either rebuild/relaunch the container, or restrict yourself to the MuJoCo track. |
+| `no navmesh loaded for scene ...` | The scene `.glb` ships without a `.navmesh`. Gibson scenes include one; if you regenerate the mesh yourself, recompute via `sim.recompute_navmesh(habitat_sim.NavMeshSettings())`. |
 | `libEGL.so.1: cannot open shared object` | Docker wasn't launched with `--gpus all`, or the NVIDIA Container Toolkit isn't installed on the host. |
 | Depth frames are all zeros | Common symptom of a disabled depth sensor on some drivers; check `sim_cfg.gpu_device_id` matches a real CUDA index. |
-| `CUDA out of memory` during training | Drop `train.batch_size` (default 128 → 64) in `configs/habitat/<dataset>.yaml`. |
+| `CUDA out of memory` during training | Drop `train.batch_size` (default 128 → 64) in `configs/habitat/gibson.yaml`. |
+| Data-gen is too slow | Drop `gibson.rollout_horizon` 3 → 1 (disables per-step future-depth capture, but `L_dyn` loses its supervision signal — expect WA to regress to risk + progress only). |

@@ -30,8 +30,11 @@ import numpy as np
 
 from ..data.expert import candidate_anchors, best_k_for_expert
 from ..utils import get_logger
+from .gibson_episodes import iter_episodes, resolve_scene_glb
 
 log = get_logger(__name__)
+
+SHARD_SCHEMA_VERSION = 2
 
 
 def _path_resample_xz(points: List[np.ndarray], step_m: float) -> np.ndarray:
@@ -86,8 +89,10 @@ def _label_candidates_habitat(
     pathfinder,
     agent_height: float,
     step_m: float = 0.5,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return (cand_collision, cand_progress) of shape (K,) each.
+    want_deadend: bool = False,
+    goal_y: Optional[float] = None,
+) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Return (cand_collision, cand_progress, cand_deadend) of shape (K,) each.
 
     cand_collision[k] = 1 if the navmesh blocks a straight step of ``step_m``
     from the current pose along anchor k's direction (used as a cheap proxy
@@ -95,14 +100,22 @@ def _label_candidates_habitat(
 
     cand_progress[k] = (current_goal_dist − new_goal_dist), where new_goal_dist
     is the geodesic distance from the post-step position to the goal.
+
+    cand_deadend[k] (when ``want_deadend=True``) = 1 iff
+    ``pathfinder.find_path`` fails from the post-step position to the goal
+    (doc §6.3 method A). Reuses the same shortest-path call that produces
+    ``cand_progress``, so it's ~free. ``None`` is returned for the dead-end
+    slot when the caller didn't request it.
     """
     x, z, yaw = pose_xzy
     gx, gz = float(goal_xz[0]), float(goal_xz[1])
     cur_dist = float(math.hypot(gx - x, gz - z))
+    gy = float(goal_y) if goal_y is not None else float(agent_height)
 
     K = anchors.shape[0]
     coll = np.zeros(K, dtype=np.float32)
     prog = np.zeros(K, dtype=np.float32)
+    dead = np.zeros(K, dtype=np.float32) if want_deadend else None
 
     # Pre-compute world-frame step directions for each anchor. Anchor vectors
     # are expressed in robot frame, so rotate by yaw into world (x, z).
@@ -121,15 +134,25 @@ def _label_candidates_habitat(
         gap = float(np.linalg.norm(np.asarray(stepped) - p_to))
         coll[k] = 1.0 if gap > 1e-3 else 0.0
 
-        # progress = geodesic goal-distance delta
-        sp = env.shortest_path(np.asarray(stepped),
-                               np.array([gx, agent_height, gz], dtype=np.float32))
-        new_dist = float(sp.geodesic_distance) if sp is not None else cur_dist
+        # progress = geodesic goal-distance delta + (optional) dead-end probe
+        sp = env.shortest_path(
+            np.asarray(stepped),
+            np.array([gx, gy, gz], dtype=np.float32),
+        )
+        if sp is None:
+            new_dist = cur_dist
+            if dead is not None:
+                dead[k] = 1.0
+        else:
+            new_dist = float(sp.geodesic_distance)
+            # safeguard against numerical quirks
+            if dead is not None and not math.isfinite(new_dist):
+                dead[k] = 1.0
         prog[k] = float(cur_dist - new_dist)
 
     # normalise progress to ~[-1, 1]
     prog = np.clip(prog / max(step_m, 1e-3), -2.0, 2.0)
-    return coll, prog
+    return coll, prog, dead
 
 
 def generate_one_scene(
@@ -191,9 +214,10 @@ def generate_one_scene(
             pose_xzy = (px, pz, yaw)
 
             ewp = _expert_wp_robot_frame(path_xz, pose_xzy, horizon_m=horizon)
-            coll, prog = _label_candidates_habitat(
+            coll, prog, _ = _label_candidates_habitat(
                 env, anchors, pose_xzy, np.asarray([g[0], g[2]], dtype=np.float32),
                 pathfinder, agent_height,
+                want_deadend=False,
             )
             best_k = best_k_for_expert(anchors, ewp)
 
@@ -269,3 +293,253 @@ def raise_if_no_habitat() -> None:
             "habitat-sim is not available. Use docker/habitat.Dockerfile on a "
             f"Linux GPU host. Original error: {e!r}"
         )
+
+
+# ----------------------------------------------------------------------------
+# Gibson PointNav v2 pipeline (schema v2)
+# ----------------------------------------------------------------------------
+
+
+def _future_depth_stack(env, path_xz: np.ndarray, origin_idx: int,
+                         step_ahead_m: float, H: int) -> tuple[np.ndarray, np.ndarray]:
+    """Capture the next ``H`` depth frames along ``path_xz`` starting from
+    ``origin_idx``. The agent is teleported forward by ``step_ahead_m`` per
+    step, depth is rendered, then the agent is teleported back at the end.
+
+    Returns
+    -------
+    future_depth : (H, H_im, W_im) float32 in metres
+    future_goal  : (H, 2) float32 [distance, bearing] to the same scene goal
+                   as the originating sample.
+    """
+    H_im, W_im = env.depth_wh[1], env.depth_wh[0]
+    future_depth = np.zeros((H, H_im, W_im), dtype=np.float32)
+    future_goal = np.zeros((H, 2), dtype=np.float32)
+
+    # remember current pose so we can restore after the probe
+    x0, z0, yaw0 = (
+        float(env._agent.state.position[0]),
+        float(env._agent.state.position[2]),
+        0.0,  # will re-read yaw below
+    )
+    y_world = float(env._agent.state.position[1])
+    # record current full state to restore exactly
+    cur_state = env._agent.state
+    cur_pos = np.asarray(cur_state.position, dtype=np.float32).copy()
+    cur_rot = cur_state.rotation
+
+    # walk forward along the path
+    acc = 0.0
+    tgt_idx = origin_idx
+    probes: list[tuple[float, float]] = []           # world (x, z)
+    for _ in range(H):
+        target = step_ahead_m
+        while tgt_idx + 1 < len(path_xz):
+            seg = math.hypot(path_xz[tgt_idx + 1, 0] - path_xz[tgt_idx, 0],
+                             path_xz[tgt_idx + 1, 2] - path_xz[tgt_idx, 2])
+            if acc + seg >= target:
+                break
+            acc += seg
+            tgt_idx += 1
+        probes.append((float(path_xz[tgt_idx, 0]), float(path_xz[tgt_idx, 2])))
+
+    import habitat_sim  # safe — we only reach here on the remote box
+    for τ, (px, pz) in enumerate(probes):
+        # orient toward next path point
+        nxt_idx = min(tgt_idx + 1, len(path_xz) - 1)
+        dx = path_xz[nxt_idx, 0] - px
+        dz = path_xz[nxt_idx, 2] - pz
+        yaw = float(math.atan2(dz, dx)) if (dx * dx + dz * dz) > 1e-8 else yaw0
+        env.teleport_xyz(np.array([px, y_world, pz], dtype=np.float32), yaw)
+        obs = env._get_obs()
+        future_depth[τ] = obs["depth"].astype(np.float32)
+        future_goal[τ] = obs["goal_vec"].astype(np.float32)
+
+    # restore original pose (matches the pre-probe sample)
+    restore = habitat_sim.AgentState()
+    restore.position = cur_pos
+    restore.rotation = cur_rot
+    env._agent.set_state(restore, reset_sensors=False)
+    return future_depth, future_goal
+
+
+def generate_one_gibson_scene(
+    env,
+    cfg: dict,
+    episodes: List[dict],
+    samples_per_episode: int,
+    rollout_horizon: int,
+    seed: int = 0,
+) -> Optional[dict]:
+    """Generate v2 shard samples for one Gibson scene from a list of Gibson
+    PointNav v2 episodes.
+
+    Compared to ``generate_one_scene`` (random-pair path), this variant:
+      * uses each episode's recorded start/goal instead of random sampling,
+      * adds ``future_depth`` / ``future_goal`` stacks (horizon H),
+      * adds per-candidate ``cand_deadend`` labels,
+      * tags the shard with ``schema_version=2``.
+    """
+    import habitat_sim  # noqa: F401
+    rng = np.random.default_rng(seed)
+    va_cfg = cfg["va"]
+    K = int(va_cfg["n_candidates"])
+    horizon_m = float(va_cfg["waypoint_horizon_m"])
+    H = int(rollout_horizon)
+    step_m_future = 0.5
+
+    anchors = candidate_anchors(K, horizon_m)
+    pathfinder = env._sim.pathfinder
+    agent_height = env.agent_height
+
+    depths: list[np.ndarray] = []
+    goals: list[np.ndarray] = []
+    poses: list[np.ndarray] = []
+    expert_wps: list[np.ndarray] = []
+    cand_coll: list[np.ndarray] = []
+    cand_prog: list[np.ndarray] = []
+    cand_dead: list[np.ndarray] = []
+    best_ks: list[int] = []
+    fut_depths: list[np.ndarray] = []
+    fut_goals: list[np.ndarray] = []
+
+    for ep in episodes:
+        sp = env.shortest_path(
+            np.asarray(ep["start_position"], dtype=np.float32),
+            np.asarray(ep["goal_position"], dtype=np.float32),
+        )
+        if sp is None or not (2.0 <= sp.geodesic_distance <= 15.0):
+            continue
+        path_xz = _path_resample_xz(list(sp.points), step_m=0.10)
+        if len(path_xz) < 4:
+            continue
+
+        goal_xyz = np.asarray(ep["goal_position"], dtype=np.float32)
+        gx, gy, gz = float(goal_xyz[0]), float(goal_xyz[1]), float(goal_xyz[2])
+
+        idx_pool = np.arange(len(path_xz) - 1)
+        n = min(samples_per_episode, len(idx_pool))
+        picks = rng.choice(idx_pool, size=n, replace=len(idx_pool) < n)
+
+        for i in picks:
+            base = path_xz[i]
+            nxt = path_xz[min(i + 2, len(path_xz) - 1)]
+            dx, dz = nxt[0] - base[0], nxt[2] - base[2]
+            if math.hypot(dx, dz) < 1e-6:
+                continue
+            yaw = float(math.atan2(dz, dx)) + float(rng.normal(0, 0.15))
+            px = float(base[0] + rng.normal(0, 0.05))
+            pz = float(base[2] + rng.normal(0, 0.05))
+            pos_xyz = np.array([px, float(base[1]), pz], dtype=np.float32)
+            env.teleport_xyz(pos_xyz, yaw)
+            env._goal_xyz = goal_xyz.copy()
+            obs = env._get_obs()
+            pose_xzy = (px, pz, yaw)
+
+            ewp = _expert_wp_robot_frame(path_xz, pose_xzy, horizon_m=horizon_m)
+            coll, prog, dead = _label_candidates_habitat(
+                env, anchors, pose_xzy, np.asarray([gx, gz], dtype=np.float32),
+                pathfinder, agent_height,
+                want_deadend=True, goal_y=gy,
+            )
+            best_k = best_k_for_expert(anchors, ewp)
+            fd, fg = _future_depth_stack(env, path_xz, int(i), step_m_future, H)
+
+            depths.append(obs["depth"].astype(np.float32))
+            goals.append(obs["goal_vec"].astype(np.float32))
+            poses.append(obs["pose"].astype(np.float32))
+            expert_wps.append(ewp.astype(np.float32))
+            cand_coll.append(coll.astype(np.float32))
+            cand_prog.append(prog.astype(np.float32))
+            cand_dead.append(dead.astype(np.float32) if dead is not None
+                             else np.zeros(K, dtype=np.float32))
+            best_ks.append(int(best_k))
+            fut_depths.append(fd)
+            fut_goals.append(fg)
+
+    if not depths:
+        return None
+    return {
+        "depth": np.stack(depths),
+        "goal": np.stack(goals),
+        "pose": np.stack(poses),
+        "expert_wp": np.stack(expert_wps),
+        "cand_collision": np.stack(cand_coll),
+        "cand_progress": np.stack(cand_prog),
+        "cand_deadend": np.stack(cand_dead),
+        "best_k": np.stack(best_ks),
+        "anchors": anchors.astype(np.float32),
+        "future_depth": np.stack(fut_depths),
+        "future_goal": np.stack(fut_goals),
+        "schema_version": np.array(SHARD_SCHEMA_VERSION, dtype=np.int32),
+    }
+
+
+def generate_dataset_gibson(
+    cfg: dict,
+    scene_dir: str,
+    episode_dir: str,
+    split: str,
+    out_dir: str,
+    samples_per_episode: int = 8,
+    max_episodes_per_scene: int = 16,
+    scene_limit: Optional[int] = None,
+    seed: int = 0,
+    gpu_device_id: int = 0,
+) -> int:
+    """Build a v2 Gibson PointNav shard set.
+
+    Groups PointNav episodes by scene, builds ``HabitatNavEnv`` once per scene,
+    and writes ``scene_<stem>.npz`` with schema v2 into ``out_dir``.
+    """
+    raise_if_no_habitat()
+    from ..envs.habitat_env import HabitatNavEnv
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # Group episodes by scene_id.
+    episodes_by_scene: dict[str, list[dict]] = {}
+    for ep in iter_episodes(episode_dir, split=split):
+        episodes_by_scene.setdefault(ep["scene_id"], []).append(ep)
+    if not episodes_by_scene:
+        raise RuntimeError(f"no episodes loaded from {episode_dir}/{split}")
+
+    scene_ids = list(episodes_by_scene.keys())
+    if scene_limit is not None:
+        scene_ids = scene_ids[:scene_limit]
+
+    rollout_horizon = int(cfg.get("wa", {}).get("rollout_horizon", 3))
+    written = 0
+    for scene_i, scene_id in enumerate(scene_ids):
+        try:
+            scene_path = resolve_scene_glb(scene_id, scene_dir)
+        except FileNotFoundError as e:
+            log.warning(f"skipping scene {scene_id}: {e}")
+            continue
+        try:
+            env = HabitatNavEnv(
+                cfg["env"], scene_glb=scene_path,
+                seed=seed + scene_i, gpu_device_id=gpu_device_id,
+            )
+        except Exception as e:
+            log.warning(f"skipping scene {scene_id}: init failed ({e})")
+            continue
+        episodes = episodes_by_scene[scene_id][:max_episodes_per_scene]
+        shard = generate_one_gibson_scene(
+            env, cfg, episodes,
+            samples_per_episode=samples_per_episode,
+            rollout_horizon=rollout_horizon,
+            seed=seed + scene_i,
+        )
+        env.close()
+        if shard is None:
+            log.warning(f"no samples for scene {scene_id}")
+            continue
+        stem = Path(scene_path).stem
+        p = out / f"scene_{stem}.npz"
+        np.savez_compressed(p, **shard)
+        written += 1
+        log.info(f"[{scene_i+1}/{len(scene_ids)}] scene {stem}: {shard['depth'].shape[0]} samples")
+    log.info(f"Done. {written} Gibson v2 shards in {out}")
+    return written

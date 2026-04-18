@@ -28,7 +28,8 @@ from bev_vawa.models import FPV_BC, BEV_BC, BEV_VA, BEVVAWA
 
 
 MODEL_MAP = {
-    "fpv_bc": FPV_BC, "bev_bc": BEV_BC, "bev_va": BEV_VA, "bev_vawa": BEVVAWA,
+    "fpv_bc": FPV_BC, "bev_bc": BEV_BC, "bev_va": BEV_VA,
+    "bev_vawa": BEVVAWA,
 }
 
 
@@ -53,6 +54,7 @@ def _build_policy(args, cfg, device):
         model.load_state_dict(state["model"], strict=False)
         from bev_vawa.eval.policies import make_model_policy
         return make_model_policy(model, device, cfg, use_wa=(args.policy == "bev_vawa"))
+
     raise ValueError(args.policy)
 
 

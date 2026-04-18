@@ -1,78 +1,76 @@
-"""Habitat-backed data generator (remote GPU track).
+"""Habitat-backed data generator (Gibson PointNav v2 track).
 
 Usage on a remote CUDA + EGL host (see docker/README.md):
 
     python scripts/generate_data_habitat.py \
-        --config configs/habitat/hssd.yaml \
-        --scenes data/scene_datasets/hssd/*.glb \
-        --out   data/pib_nav_habitat \
-        --pairs-per-scene 16 --samples-per-pair 8
+        --config      configs/habitat/gibson.yaml \
+        --scene-dir   data/scene_datasets/gibson \
+        --episode-dir data/datasets/pointnav/gibson/v2 \
+        --split       train \
+        --out         data/gibson_pointnav_v2_shards/train
 
-Each scene produces a single ``scene_<stem>.npz`` shard in the same format as
-``scripts/generate_data.py`` (the MuJoCo version), so downstream training
-(``scripts/train.py``) is unchanged.
+Each scene produces ``scene_<stem>.npz`` shards in **schema v2** — they carry
+``future_depth`` / ``future_goal`` (for the WA latent-dynamics loss) and
+``cand_deadend`` (for the WA dead-end head) alongside the standard fields.
+Downstream training (``scripts/train.py``) is unchanged.
 """
 from __future__ import annotations
 import argparse
-import glob
-from pathlib import Path
 
 from bev_vawa.utils import load_config, set_seed
 
 
-def _expand_scenes(patterns):
-    out = []
-    for p in patterns:
-        matches = sorted(glob.glob(p))
-        if not matches and Path(p).exists():
-            matches = [p]
-        out.extend(matches)
-    return sorted(set(out))
-
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/habitat/default.yaml")
-    ap.add_argument("--scenes", nargs="+", required=True,
-                    help="Scene file(s) or glob(s). E.g. 'data/hssd/*.glb'.")
-    ap.add_argument("--out", default=None, help="shard output dir (defaults to cfg.data.out_dir)")
-    ap.add_argument("--pairs-per-scene", type=int, default=None)
-    ap.add_argument("--samples-per-pair", type=int, default=None)
+    ap.add_argument("--config", default="configs/habitat/gibson.yaml")
+    ap.add_argument("--dataset", default="gibson", choices=["gibson", "gibson_v2"],
+                    help="Dataset source (only Gibson PointNav v2 is supported).")
+    ap.add_argument("--scene-dir", required=True,
+                    help="Dir containing Gibson .glb files, e.g. data/scene_datasets/gibson.")
+    ap.add_argument("--episode-dir", required=True,
+                    help="Dir with pointnav_gibson_v2 episodes, e.g. "
+                         "data/datasets/pointnav/gibson/v2.")
+    ap.add_argument("--split", default="train", help="One of train|val|test.")
+    ap.add_argument("--out", default=None,
+                    help="Shard output dir (defaults to cfg.data.out_dir).")
+    ap.add_argument("--samples-per-episode", type=int, default=None)
+    ap.add_argument("--max-episodes-per-scene", type=int, default=16,
+                    help="How many episodes per scene to rollout.")
+    ap.add_argument("--scene-limit", type=int, default=None,
+                    help="Cap on the number of scenes to process.")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--gpu", type=int, default=0, help="CUDA device id for habitat-sim renderer")
+    ap.add_argument("--gpu", type=int, default=0, help="CUDA device id for habitat-sim renderer.")
     ap.add_argument("--tiny", action="store_true",
-                    help="1 scene x 2 pairs x 4 samples — for docker sanity")
+                    help="Minimal sanity run: 2 scenes x 2 episodes x 2 samples.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     set_seed(args.seed)
     out_dir = args.out or cfg["data"]["out_dir"]
 
-    # default knobs from cfg, overrideable from CLI
-    hab = cfg.get("habitat", {})
-    n_pairs = args.pairs_per_scene or int(hab.get("pairs_per_scene", 16))
-    n_per_pair = args.samples_per_pair or int(hab.get("samples_per_pair", 8))
-
-    scenes = _expand_scenes(args.scenes)
+    samples_per_episode = args.samples_per_episode or int(
+        cfg.get("gibson", {}).get("samples_per_episode", 8))
+    max_ep = args.max_episodes_per_scene
+    scene_limit = args.scene_limit
     if args.tiny:
-        scenes = scenes[:1]
-        n_pairs = 2
-        n_per_pair = 4
+        samples_per_episode = 2
+        max_ep = 2
+        scene_limit = 2
 
-    if not scenes:
-        raise SystemExit(f"no scenes matched {args.scenes!r}")
-
-    # defer import to here: habitat-sim is only required inside the docker image
-    from bev_vawa.data.rollout_habitat import generate_dataset_habitat
-
-    n = generate_dataset_habitat(
-        cfg, scenes, out_dir,
-        n_pairs_per_scene=n_pairs,
-        samples_per_pair=n_per_pair,
+    from bev_vawa.data.rollout_habitat import generate_dataset_gibson
+    n = generate_dataset_gibson(
+        cfg,
+        scene_dir=args.scene_dir,
+        episode_dir=args.episode_dir,
+        split=args.split,
+        out_dir=out_dir,
+        samples_per_episode=samples_per_episode,
+        max_episodes_per_scene=max_ep,
+        scene_limit=scene_limit,
         seed=args.seed,
         gpu_device_id=args.gpu,
     )
-    print(f"wrote {n} shards to {out_dir}")
+    print(f"wrote {n} Gibson v2 shards to {out_dir}")
 
 
 if __name__ == "__main__":

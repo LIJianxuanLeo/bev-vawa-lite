@@ -6,9 +6,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ..data.dataset import NavShardDataset
-from ..models import BEVVAWA
 from ..utils import get_device, get_logger, set_seed
 from .losses import va_loss
+from ._common import build_model
+
 
 log = get_logger(__name__)
 
@@ -25,7 +26,7 @@ def train_stage_a(cfg: dict, data_dir: str, out_ckpt: str, epochs: int | None = 
     dl = DataLoader(ds, batch_size=cfg["train"]["batch_size"], shuffle=True,
                     num_workers=cfg["train"]["num_workers"], drop_last=False)
 
-    model = BEVVAWA(cfg).to(device)
+    model = build_model(cfg).to(device)
     opt = torch.optim.AdamW(
         list(model.encoder.parameters()) + list(model.va.parameters()),
         lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"],

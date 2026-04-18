@@ -1,0 +1,9 @@
+# Gibson ablation: occupancy-only BEV.
+#
+# Keeps everything else identical to gibson.yaml but disables the free-space
+# and goal-prior BEV channels. Used to measure the contribution of the
+# multi-channel BEV in the paper's ablation table.
+inherit: ./gibson.yaml
+
+bev:
+  channels_enabled: [1, 0, 0]

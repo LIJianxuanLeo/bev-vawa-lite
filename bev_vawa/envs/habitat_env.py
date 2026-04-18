@@ -95,10 +95,12 @@ class HabitatNavEnv:
         seed: int = 0,
         agent_height: float = 1.0,
         gpu_device_id: int = 0,
+        scene_dataset_config_file: Optional[str] = None,
     ):
         _require_habitat()
         self.cfg = env_cfg
         self.scene_glb = scene_glb
+        self.scene_dataset_config_file = scene_dataset_config_file
         self.agent_height = float(agent_height)
         self.gpu_device_id = int(gpu_device_id)
 
@@ -127,6 +129,10 @@ class HabitatNavEnv:
     def _build_sim(self) -> None:
         sim_cfg = habitat_sim.SimulatorConfiguration()
         sim_cfg.scene_id = self.scene_glb
+        if self.scene_dataset_config_file is not None:
+            # Gibson / HSSD / HM3D ship with a ``*.scene_dataset_config.json``
+            # that habitat-sim 0.3+ uses to resolve asset paths and stage IDs.
+            sim_cfg.scene_dataset_config_file = self.scene_dataset_config_file
         sim_cfg.gpu_device_id = self.gpu_device_id
         sim_cfg.enable_physics = True
 

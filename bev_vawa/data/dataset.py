@@ -8,7 +8,10 @@ from torch.utils.data import Dataset
 
 
 def list_shards(data_dir: str) -> List[Path]:
-    return sorted(Path(data_dir).glob("room_*.npz"))
+    """List shards produced by either the MuJoCo rollout (``room_*.npz``) or
+    the Habitat rollout (``scene_*.npz``)."""
+    d = Path(data_dir)
+    return sorted(list(d.glob("room_*.npz")) + list(d.glob("scene_*.npz")))
 
 
 class NavShardDataset(Dataset):
@@ -25,14 +28,29 @@ class NavShardDataset(Dataset):
         self.depth_max = float(depth_max)
         self._index: list[tuple[int, int]] = []
         self._anchors = None
+        # Schema detection: v1 shards lack 'schema_version' and the v2-only
+        # keys. We record the per-shard flag so __getitem__ can expose extra
+        # tensors without breaking v1 datasets.
+        self._schema_v2: list[bool] = []
         for si, p in enumerate(self.shards):
             with np.load(p) as z:
                 n = z["depth"].shape[0]
                 if self._anchors is None:
                     self._anchors = z["anchors"].astype(np.float32)
+                v2 = (
+                    "schema_version" in z.files
+                    and int(z["schema_version"].item()) >= 2
+                    and "future_depth" in z.files
+                    and "cand_deadend" in z.files
+                )
+            self._schema_v2.append(bool(v2))
             for li in range(n):
                 self._index.append((si, li))
         self._cache: dict[int, dict] = {}
+        # Aggregate flag — the trainer uses this to decide whether it can
+        # train the dynamics / dead-end losses.
+        self.has_future = all(self._schema_v2)
+        self.has_deadend = all(self._schema_v2)
 
     def __len__(self) -> int:
         return len(self._index)
@@ -62,7 +80,7 @@ class NavShardDataset(Dataset):
         cand_coll = shard["cand_collision"][li].astype(np.float32)
         cand_prog = shard["cand_progress"][li].astype(np.float32)
         best_k = int(shard["best_k"][li])
-        return {
+        sample = {
             "depth": torch.from_numpy(depth).unsqueeze(0),  # (1, H, W)
             "goal": torch.from_numpy(goal),
             "expert_wp": torch.from_numpy(expert_wp),
@@ -70,3 +88,17 @@ class NavShardDataset(Dataset):
             "cand_progress": torch.from_numpy(cand_prog),
             "best_k": torch.tensor(best_k, dtype=torch.long),
         }
+        # v2 extras — only present on Gibson shards (schema_version >= 2).
+        if self._schema_v2[si]:
+            fd = shard["future_depth"][li].astype(np.float32) / self.depth_max   # (H, H_im, W_im)
+            # shape to (H, 1, H_im, W_im) so the encoder can treat each future
+            # step as a (B, 1, H_im, W_im) batch when needed.
+            sample["future_depth"] = torch.from_numpy(fd).unsqueeze(1)
+            if "future_goal" in shard:
+                sample["future_goal"] = torch.from_numpy(
+                    shard["future_goal"][li].astype(np.float32)
+                )                                                                 # (H, 2)
+            sample["cand_deadend"] = torch.from_numpy(
+                shard["cand_deadend"][li].astype(np.float32)
+            )                                                                     # (K,)
+        return sample
