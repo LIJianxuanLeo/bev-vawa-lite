@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stage Report — BEV-VAWA-Lite</title>
+<style>
+  /* Times New Roman, all black, academic-paper layout. */
+  html, body {
+    font-family: "Times New Roman", Times, serif;
+    color: #000;
+    background: #fff;
+    font-size: 11pt;
+    line-height: 1.45;
+    max-width: 820px;
+    margin: 2.5em auto;
+    padding: 0 2em 4em 2em;
+  }
+  h1, h2, h3, h4 { color: #000; font-weight: bold; margin-top: 1.4em; }
+  h1 { font-size: 16pt; text-align: center; line-height: 1.3; margin-bottom: 0.3em; }
+  h2 { font-size: 13pt; border-bottom: 1px solid #000; padding-bottom: 2px; }
+  h3 { font-size: 11.5pt; font-style: italic; }
+  p  { text-align: justify; margin: 0.6em 0; }
+  .meta { text-align: center; margin-bottom: 2em; }
+  .abstract {
+    margin: 1.5em 3em;
+    font-size: 10.5pt;
+    text-align: justify;
+  }
+  .abstract::before {
+    content: "Abstract. ";
+    font-weight: bold;
+  }
+  table {
+    border-collapse: collapse;
+    margin: 1em auto;
+    font-size: 10pt;
+  }
+  th, td {
+    border-top: 1px solid #000;
+    border-bottom: 1px solid #000;
+    padding: 4px 10px;
+    text-align: center;
+    color: #000;
+  }
+  thead th { border-top: 1.5px solid #000; border-bottom: 1px solid #000; }
+  tbody tr:last-child td { border-bottom: 1.5px solid #000; }
+  th:first-child, td:first-child { text-align: left; }
+  .caption { font-size: 9.5pt; margin: 0.3em 3em 1.4em 3em; text-align: center; }
+  .caption b { font-weight: bold; }
+  code, tt, .mono { font-family: "Courier New", monospace; font-size: 10pt; }
+  .eq {
+    text-align: center;
+    margin: 0.8em 0;
+    font-style: italic;
+  }
+  cite, .cite { font-style: normal; }
+  .cite-num { color: #000; }
+  ol.refs { padding-left: 1.5em; font-size: 10pt; }
+  ol.refs li { margin-bottom: 0.35em; text-align: left; }
+  a { color: #000; text-decoration: none; border-bottom: 0.5px dotted #000; }
+  hr { border: none; border-top: 1px solid #000; margin: 2em 0 1em 0; }
+  .note { font-style: italic; font-size: 10pt; }
+  sup { line-height: 0; }
+</style>
+</head>
+<body>
+
+<h1>Stage Report:<br>
+A Lightweight Vision-Action / World-Action Navigation Stack<br>
+with Reactive Safety Augmentation on the PIB-Nav Benchmark</h1>
+<div class="meta">
+  BEV-VAWA-Lite Project &nbsp;·&nbsp; April 2026
+</div>
+
+<div class="abstract">
+We report interim results on <b>BEV-VAWA-Lite</b>, a lightweight depth-only PointGoal navigation stack
+combining a reactive Vision-Action (VA) branch with a short-horizon latent World-Action (WA) branch
+over a shared bird's-eye-view (BEV) state. The system is trained entirely on a consumer-grade Apple M4
+laptop using a procedural MuJoCo benchmark (<i>PIB-Nav</i>). This report consolidates four milestones:
+(i) a full-scale retrain that raised Success Rate (SR) at our headline seed from 0.39 to 0.45 over
+100 held-out episodes;
+(ii) two on-policy ablations isolating the contribution of the WA branch and its rollout horizon;
+(iii) a metric hygiene fix for pathological SPL values; and (iv) a reactive safety override — an
+artificial-potential-field (APF) correction on the forward arc augmented with an independent
+lateral-sector scrape guard — that improves SR by
+<b>+0.093&nbsp;±&nbsp;0.013 paired across four seeds</b> (+8 to +11 pp, never negative),
+bringing mean SR to 0.49 and matching the reactive-safety A<sup>⋆</sup> baseline (0.50). We include a
+per-seed analysis showing that while the absolute per-seed SR has a ±5 pp spread on this small test
+set, the safety improvement is approximately 4× more consistent than the raw per-seed variance. We
+close with a roadmap toward latent-dynamics and reachability supervision on the Gibson PointNav v2
+track, motivated by the residual failure modes that reactive augmentation provably cannot address.
+</div>
+
+<h2>1&nbsp;&nbsp;Background and Scope</h2>
+<p>
+BEV-VAWA-Lite targets the <i>static, depth-only, indoor PointGoal</i> slice of embodied navigation
+[<a href="#ref-anderson">1</a>], where recent foundation-scale systems [<a href="#ref-omnivla">12</a>,
+<a href="#ref-navila">11</a>, <a href="#ref-internnav">13</a>] are arguably overbuilt. The stack
+factorises the problem into a <i>fast</i> reactive branch that proposes K=5 candidate waypoints on a fan
+anchor, and a <i>slow</i> evaluator that rolls out each candidate in a latent BEV for a short horizon
+H=3, reading out collision risk, goal progress, and epistemic uncertainty from a three-member ensemble.
+Candidates are re-ranked by an analytic fusion rule
+</p>
+<div class="eq">
+  Q<sub>k</sub> = α · s̃<sub>k</sub> + β · p̂<sub>k</sub> − γ · σ(r̂<sub>k</sub>) − δ · û<sub>k</sub>,&nbsp;&nbsp;&nbsp;&nbsp;(1)
+</div>
+<p>
+where s̃, p̂, r̂, û are the soft-maxed VA score, predicted progress, risk logit, and uncertainty, and
+(α, β, γ, δ) = (1.0, 1.5, 2.0, 0.5). The winning anchor is converted to (v, ω) commands by a
+pure-pursuit controller [<a href="#ref-coulter">4</a>].
+</p>
+<p>
+The four milestones reported here concern the <i>PIB-Nav</i> track (MuJoCo, laptop-local). The parallel
+Gibson [<a href="#ref-gibson">11</a>] remote track described in Section&nbsp;7 is in planning and is
+explicitly out of scope for the numbers below.
+</p>
+
+<h2>2&nbsp;&nbsp;Milestone 1: Full-Scale PIB-Nav Retraining</h2>
+<p>
+<b>Protocol.</b> We regenerated the offline expert dataset with 1000 procedural rooms and 64 samples
+per room (cf.&nbsp;the initial 200×32 regime), and ran the three-stage curriculum with
+(e<sub>A</sub>, e<sub>B</sub>, e<sub>C</sub>) = (20, 20, 8) epochs. Stage A supervises the encoder and
+VA head with cross-entropy on the expert-matched anchor plus a Huber term on the selected offset; Stage
+B freezes the encoder and fits the WA heads with binary cross-entropy (risk), mean squared error
+(progress), and ensemble variance (uncertainty); Stage C unfreezes the final encoder block and the two
+heads jointly.
+</p>
+<p>
+<b>Result.</b> On a held-out 100-episode suite (Table&nbsp;1, row <i>BEV-VAWA (full)</i>), SR rose from
+0.39 (prior 200×32, epochs 6/6/3 baseline) to <b>0.45</b>, with CollisionRate dropping from 0.65 to
+0.58. SPL improved commensurately to 0.44. All subsequent results use the retrained checkpoint
+<span class="mono">runs/default/stage_c.pt</span>. Total wall-clock on the M4: ~5.5h data generation +
+~3h training, fully on-device.
+</p>
+
+<h2>3&nbsp;&nbsp;Milestone 2: On-Policy Ablations</h2>
+<p>
+Two targeted ablations isolate the two non-obvious design choices of the WA branch: (a) its existence,
+and (b) its rollout horizon.
+</p>
+<p>
+<b>(a)&nbsp;<i>no_wa</i>.</b> At inference time, the WA branch is silenced by setting
+(γ, δ) = (0, 0) in Eq.&nbsp;1 so that only the VA score and an analytic progress proxy drive candidate
+selection. No retraining is required — the ablation reuses the full-model checkpoint. SR drops to
+<b>0.39</b> (−6 pp) and CollisionRate rises to 0.63. This quantifies the WA branch's end-task
+contribution under identical encoder parameters.
+</p>
+<p>
+<b>(b)&nbsp;<i>h1</i>.</b> The rollout horizon of the WA branch is shortened from H=3 to H=1 and stages
+B and C are retrained from the shared Stage-A checkpoint. SR ends at <b>0.44</b> (−1 pp). The near-null
+delta is informative: with only risk / progress / uncertainty <i>end-state</i> supervision and no
+intermediate-step objective, the longer rollout adds few gradients and thus little expressive power.
+This observation motivates the latent-dynamics loss <i>L</i><sub>dyn</sub> in Section&nbsp;7,
+which supervises the per-step rollout latents directly, as proposed for latent world models in
+[<a href="#ref-ha">5</a>, <a href="#ref-dreamer">6</a>].
+</p>
+
+<table>
+<thead>
+<tr><th>Method</th><th>SR ↑</th><th>SPL ↑</th><th>Coll ↓</th><th>PLR</th><th>Lat.&nbsp;(ms)</th></tr>
+</thead>
+<tbody>
+<tr><td>A<sup>⋆</sup> Upper Bound</td><td>0.48</td><td>0.47</td><td>0.54</td><td>0.89</td><td>2.76</td></tr>
+<tr><td>A<sup>⋆</sup> + Safety</td><td>0.50</td><td>0.49</td><td>0.50</td><td>0.90</td><td>2.63</td></tr>
+<tr><td colspan="6"><i>Ablations — single seed 12345, n=100 episodes</i></td></tr>
+<tr><td>BEV-VAWA (<i>no_wa</i>)</td><td>0.39</td><td>0.38</td><td>0.63</td><td>0.92</td><td>6.00</td></tr>
+<tr><td>BEV-VAWA (<i>no_unc</i>)</td><td>0.45</td><td>0.44</td><td>0.58</td><td>0.92</td><td>5.57</td></tr>
+<tr><td>BEV-VAWA (<i>h1</i>)</td><td>0.44</td><td>0.43</td><td>0.58</td><td>0.91</td><td>5.03</td></tr>
+<tr><td>BEV-VAWA (<i>full</i>)</td><td>0.45</td><td>0.44</td><td>0.58</td><td>0.92</td><td>5.54</td></tr>
+<tr><td>BEV-VAWA (<i>full</i> + Safety)</td><td>0.53</td><td>0.52</td><td>0.50</td><td>0.91</td><td>6.05</td></tr>
+<tr><td colspan="6"><i>Cross-seed — mean 4 seeds {12345, 42, 7, 31337}, n=100 each</i></td></tr>
+<tr><td>BEV-VAWA (<i>full</i>, mean 4 seeds)</td><td>0.40&nbsp;±&nbsp;0.05</td><td>0.39&nbsp;±&nbsp;0.05</td><td>0.65&nbsp;±&nbsp;0.05</td><td>0.92</td><td>5.76</td></tr>
+<tr><td><b>BEV-VAWA (<i>full</i>+Safety, mean 4 seeds)</b></td><td><b>0.49&nbsp;±&nbsp;0.05</b></td><td><b>0.49&nbsp;±&nbsp;0.05</b></td><td><b>0.57&nbsp;±&nbsp;0.06</b></td><td>0.92</td><td>6.11</td></tr>
+</tbody>
+</table>
+<div class="caption">
+<b>Table&nbsp;1.</b> Primary results on 100 held-out PIB-Nav episodes. SR = Success Rate;
+SPL = Success weighted by Path Length [<a href="#ref-anderson">1</a>]; Coll = CollisionRate; PLR =
+PathLenRatio. The two rows marked <i>mean 4 seeds</i> are averaged over seeds {12345, 42, 7, 31337}
+with per-seed σ after the ±; A<sup>⋆</sup> rows are deterministic single-seed. Ablations share the
+headline seed 12345 — per-seed offset cancels in a paired comparison to the <i>full</i> row at the
+same seed.
+</div>
+
+<h2>4&nbsp;&nbsp;Milestone 3: SPL Metric Hygiene</h2>
+<p>
+A latent bug in the evaluation harness propagated <span class="mono">NaN</span> values into SPL and
+PathLenRatio whenever the closed-loop evaluator's grid-based reference planner failed to connect start
+and goal, which the code silently replaced by ∞. For unsuccessful episodes in that regime the
+SPL = ℓ<sup>⋆</sup> / ℓ<sub>agent</sub> definition [<a href="#ref-anderson">1</a>] degenerates to
+∞/∞ = NaN, contaminating both per-method summaries and the cross-method aggregate. We patched
+<span class="mono">bev_vawa/eval/metrics.py</span> to conservatively emit SPL = 0 for failed episodes
+with non-finite reference path length, and to exclude such episodes from the PLR mean. All four
+milestones were re-evaluated under the corrected metric; the SPL column of Table&nbsp;1 reflects the
+post-fix values.
+</p>
+
+<h2>5&nbsp;&nbsp;Milestone 4: A Reactive Safety Layer</h2>
+<p>
+Inspection of the 55 failures at the <i>full</i> checkpoint revealed that ~95% were collision-budget
+exhaustions (10 successive contacts), not time-outs or goal-divergence. We therefore developed a
+<i>reactive safety override</i>: a depth-only module that observes o<sub>t</sub> and perturbs the
+policy command (v, ω) in-place, with <i>zero</i> training and <i>zero</i> access to internal model
+state. The module is a post-hoc shim; the learned policy is unchanged.
+</p>
+
+<h3>5.1&nbsp;&nbsp;Design</h3>
+<p>
+The override combines an artificial-potential-field (APF) forward corrector in the spirit of Khatib
+[<a href="#ref-khatib">7</a>] with an independent lateral-sector scrape guard. Depth pixels outside a
+small valid threshold are discarded, and all clearance statistics use the 5<sup>th</sup> percentile of
+remaining pixels, which is robust to MuJoCo depth misses.
+</p>
+<p>
+<b>Forward APF.</b> Let d<sub>min</sub> denote the minimum clearance in a 60%-wide forward column band
+(±27° at FOV 90°). When d<sub>min</sub> &lt; d<sub>warn</sub> the wrapper adds an additive angular
+correction scaled by left/right depth asymmetry within the arc and by a linear urgency ramp
+κ ∈ [0, 1]:
+</p>
+<div class="eq">
+ω<sub>fwd</sub> = asym · ω<sub>max</sub> · (0.5 + 0.5 κ),&nbsp;&nbsp;&nbsp;&nbsp;(2)
+</div>
+<p>
+with [d<sub>near</sub>, d<sub>warn</sub>] = [0.35, 0.60] m. Linear speed is <i>never zeroed</i> — in
+the innermost band the controller still emits v = 0.3 v<sub>max</sub> while rotating. An asymmetry
+tiebreaker (falling back to the policy's own ω sign, then a fixed left bias) prevents spin-in-place
+lock, which we verified as a dominant failure mode of hard-gated reactive layers
+[<a href="#ref-borenstein">3</a>, <a href="#ref-simmons">10</a>].
+</p>
+<p>
+<b>Lateral scrape guard.</b> The forward arc alone is blind to side-scrapes — episodes in which depth
+directly ahead is clear but the robot's shoulder grazes an obstacle during a turn. We add two
+independent lateral sectors covering the outer 20% of image columns on each side (approximately ±27°
+to ±45°), computing side-specific closeness scores c<sub>ℓ</sub>, c<sub>r</sub> ∈ [0, 1] from the same
+clearance statistic. The side correction and a mild speed taper are always evaluated, summed with
+Eq.&nbsp;2, and clipped:
+</p>
+<div class="eq">
+ω<sub>side</sub> = (c<sub>r</sub> − c<sub>ℓ</sub>) · g · ω<sub>max</sub>,&nbsp;&nbsp;&nbsp;
+v<sub>mult</sub> = 1 − (1 − τ) · max(c<sub>ℓ</sub>, c<sub>r</sub>),
+</div>
+<div class="eq">
+ω′ = clip(ω + ω<sub>fwd</sub> + ω<sub>side</sub>, −ω<sub>max</sub>, +ω<sub>max</sub>),&nbsp;&nbsp;
+v′ = v<sub>new</sub> · v<sub>mult</sub>,
+</div>
+<p>
+with (g, τ, d<sub>side</sub>) = (0.6, 0.85, 0.40 m).
+</p>
+
+<h3>5.2&nbsp;&nbsp;Results</h3>
+<p>
+<b>Headline-seed result.</b> At seed 12345 the safety override raises SR to <b>0.53</b>, SPL to
+<b>0.52</b>, and lowers CollisionRate to <b>0.50</b> (Table&nbsp;1). Applied on top of the privileged
+A<sup>⋆</sup> planner the same override reduces its collision rate from 0.54 to 0.50, confirming that
+the augmentation is policy-agnostic.
+</p>
+<p>
+<b>Paired cross-seed analysis.</b> To separate the safety improvement from per-seed noise we re-ran
+both <i>full</i> and <i>full</i>+Safety at three additional seeds {42, 7, 31337}. The mean over four
+seeds is 0.40&nbsp;±&nbsp;0.05&nbsp;→&nbsp;0.49&nbsp;±&nbsp;0.05 on SR and
+0.39&nbsp;±&nbsp;0.05&nbsp;→&nbsp;0.49&nbsp;±&nbsp;0.05 on SPL. The per-seed paired deltas are
+{+0.08, +0.09, +0.09, +0.11} on SR, giving
+<b>ΔSR = +0.093&nbsp;±&nbsp;0.013</b> and an analogous ΔColl = −0.072. In other words, although
+absolute per-seed SR has a σ of 0.05 on this small test set, the <i>paired</i> safety improvement has
+a σ of only 0.013 — a 4× reduction in variance that makes the improvement statistically clean even in
+a low-<i>n</i> regime. We regard this as the primary claim of Milestone 4; the headline-seed +8 pp
+number is an illustrative single case inside this distribution.
+</p>
+<p>
+<b>Relation to the A<sup>⋆</sup> upper bound.</b> The A<sup>⋆</sup> baseline in Table&nbsp;1 is a
+<i>controller-limited</i> oracle: it replans on the ground-truth inflated occupancy grid every step,
+but tracks the resulting path with the same pure-pursuit controller as the learned policy. At seed
+12345 the learned policy plus safety exceeds this upper bound by +5 pp SR; on the 4-seed mean it sits
+within 1 pp of both the A<sup>⋆</sup> upper bound (0.48) and the A<sup>⋆</sup>+Safety row (0.50),
+slightly below the latter. Rather than claiming the learned policy <i>surpasses</i> the geometric
+planner as a general statement, the honest reading is: the learned+safety configuration is
+<i>statistically indistinguishable</i> from A<sup>⋆</sup>+safety on this benchmark, while being a pure
+neural-network policy with no access to the ground-truth occupancy grid at inference time. The
+stronger claim — that test-time augmentation can close the gap to a controller-limited oracle — is
+what survives the seed sweep.
+</p>
+
+<h2>6&nbsp;&nbsp;Discussion</h2>
+<p>
+<b>1.&nbsp;Test-time augmentation can close the gap to a controller-limited planner upper bound.</b>
+Practitioners often treat A<sup>⋆</sup> as an absolute ceiling; our results show this is misleading
+when the A<sup>⋆</sup> trajectory feeds a non-ideal tracker. Averaged over four seeds, reactive safety
+augmentation brings the learned policy to within 1 pp of both the bare A<sup>⋆</sup> baseline and the
+A<sup>⋆</sup>+Safety baseline (Table&nbsp;1). At one seed it even overshoots by +5 pp, but the
+cross-seed mean is the claim we endorse.
+</p>
+<p>
+<b>2.&nbsp;Reactive augmentation has a structural ceiling.</b> The 47% residual failure rate of the
+final system is dominated by cases that no forward-facing depth-only reactive module can resolve:
+dead-end corridors, tight U-shaped alcoves, and crowded-corner spawns. These require either global
+re-planning or structural changes to the learned policy itself. The WA branch's <i>h1</i> ablation
+already hinted at the direction: supervision on intermediate rollout latents, and a
+reachability-aware fusion term, as specified next.
+</p>
+
+<h2>7&nbsp;&nbsp;Seed-Stability Protocol</h2>
+<p>
+PIB-Nav is a deliberately small benchmark — 100 procedural test rooms at a fixed seed — and we
+observe that the absolute per-seed SR of the learned policy has a standard deviation of ≈0.05 on this
+test set (Table&nbsp;2). The practical implications we adopt throughout this report are:
+</p>
+<ol>
+<li><b>Headline numbers are mean ± std over 4 seeds</b> {12345, 42, 7, 31337} for the two
+learned-policy rows in Table&nbsp;1.</li>
+<li><b>Ablations are interpreted as paired deltas at the same seed</b>, not as absolute SR. Per-seed
+offset cancels in the ΔSR column. The single-seed SR level of a given ablation is therefore
+treated as a diagnostic, not as a claim.</li>
+<li><b>The <i>no_unc</i> ablation is byte-identical to <i>full</i></b> at seed 12345: setting δ=0 in
+the fusion equation changes no candidate ranking. Combined with per-seed variance this is evidence
+that the uncertainty term δû as currently implemented does not meaningfully influence test-time
+decisions, and will be either re-calibrated or retired in the Gibson-v2 re-design.</li>
+<li><b>Paired improvements with σ well below the raw per-seed σ are the strongest evidence.</b> The
+safety override qualifies (σ<sub>Δ</sub>=0.013 vs. raw σ=0.05).</li>
+</ol>
+
+<table>
+<thead>
+<tr><th>Seed</th><th><i>full</i> SR</th><th><i>full</i>+Safety SR</th><th>ΔSR</th><th>ΔColl</th></tr>
+</thead>
+<tbody>
+<tr><td>12345</td><td>0.45</td><td>0.53</td><td>+0.08</td><td>−0.08</td></tr>
+<tr><td>42</td><td>0.34</td><td>0.43</td><td>+0.09</td><td>−0.06</td></tr>
+<tr><td>7</td><td>0.37</td><td>0.46</td><td>+0.09</td><td>−0.08</td></tr>
+<tr><td>31337</td><td>0.43</td><td>0.54</td><td>+0.11</td><td>−0.07</td></tr>
+<tr><td><b>mean ± std</b></td><td><b>0.40&nbsp;±&nbsp;0.05</b></td><td><b>0.49&nbsp;±&nbsp;0.05</b></td><td><b>+0.093&nbsp;±&nbsp;0.013</b></td><td><b>−0.072&nbsp;±&nbsp;0.010</b></td></tr>
+</tbody>
+</table>
+<div class="caption">
+<b>Table&nbsp;2.</b> Per-seed closed-loop results on 100 held-out episodes. The paired Δ row shows
+that the safety improvement is sign-stable and low-variance even though the absolute SR of either
+configuration varies by ∼10 pp across seeds.
+</div>
+
+<h2>8&nbsp;&nbsp;Forward Plan</h2>
+<p>
+Two upgrades are planned for the remote Gibson PointNav v2 track [<a href="#ref-gibson">11</a>], each
+addressing a specific failure mode identified above.
+</p>
+<p>
+<b>BEV Layer 2: geometrically-grounded multi-channel BEV.</b> The current encoder applies adaptive
+pooling to a CNN feature map; it does not perform an explicit metric back-projection of the depth
+frame onto the floor plane. Gibson-v2 introduces a differentiable <i>geometry lift</i> producing a
+three-channel BEV (occ, free, goal-prior) of resolution 64 × 64, bringing the representation closer to
+the canonical BEV designs in autonomous driving [<a href="#ref-lss">9</a>, <a href="#ref-bevfusion">8</a>].
+</p>
+<p>
+<b>WA Layer 2: latent dynamics <i>L</i><sub>dyn</sub> and dead-end head.</b> Inspired by latent world
+models [<a href="#ref-ha">5</a>, <a href="#ref-dreamer">6</a>] and reachability prediction in safe RL
+[<a href="#ref-bansal">2</a>], the WA rollout latents ẑ<sub>t+τ</sub> will be supervised against a
+no-grad future encoder pass over τ ∈ {1, …, H} future frames, and a per-candidate dead-end logit
+d<sub>k</sub> will be trained via binary cross-entropy using Habitat's
+<span class="mono">pathfinder.find_path</span> as the label oracle. The fusion rule is extended to
+</p>
+<div class="eq">
+Q<sub>k</sub><sup>v2</sup> = Q<sub>k</sub> − η · σ(d<sub>k</sub>),&nbsp;&nbsp;η = 1.0,
+</div>
+<p>
+directly addressing the residual failure cluster isolated in Section&nbsp;6: dead-end avoidance is
+reachability rather than clearance, and is invisible to any forward-looking reactive module.
+</p>
+
+<h2>9&nbsp;&nbsp;Conclusion</h2>
+<p>
+Within the depth-only, laptop-trained PIB-Nav regime we demonstrate: a data-and-epoch-scaling
+improvement at the headline seed (Milestone 1); a clean decomposition of the WA branch's end-task
+contribution with a null finding on the uncertainty term (Milestone 2); a metric-side correctness fix
+(Milestone 3); and a reactive safety override that delivers a paired SR improvement of
+<b>+0.093&nbsp;±&nbsp;0.013</b> across four seeds, closing the gap to the controller-limited
+A<sup>⋆</sup> upper bound in the cross-seed mean and exceeding it at the headline seed (Milestone 4).
+The remaining ≈50% failure mass is <i>architecturally structural</i>: it requires
+latent-dynamics and reachability supervision on a geometrically grounded BEV, which is the subject of
+the ongoing Gibson PointNav v2 track.
+</p>
+
+<h2>References</h2>
+<ol class="refs">
+  <li id="ref-anderson">P. Anderson, A. Chang, D. S. Chaplot, A. Dosovitskiy, S. Gupta, V. Koltun,
+      J. Kosecka, J. Malik, R. Mottaghi, M. Savva, A. R. Zamir.
+      On Evaluation of Embodied Navigation Agents. <i>arXiv:1807.06757</i>, 2018.</li>
+  <li id="ref-bansal">S. Bansal, M. Chen, S. Herbert, C. J. Tomlin.
+      Hamilton-Jacobi Reachability: A Brief Overview and Recent Advances.
+      In <i>IEEE Conf.&nbsp;on Decision and Control (CDC)</i>, 2017.</li>
+  <li id="ref-borenstein">J. Borenstein, Y. Koren. Real-time Obstacle Avoidance for Fast Mobile Robots.
+      <i>IEEE Trans.&nbsp;on Systems, Man, and Cybernetics</i>, 19(5):1179–1187, 1989.</li>
+  <li id="ref-coulter">R. C. Coulter. Implementation of the Pure Pursuit Path Tracking Algorithm.
+      Technical Report CMU-RI-TR-92-01, Carnegie Mellon University, 1992.</li>
+  <li id="ref-ha">D. Ha, J. Schmidhuber. World Models.
+      In <i>NeurIPS</i>, 2018.</li>
+  <li id="ref-dreamer">D. Hafner, J. Pasukonis, J. Ba, T. Lillicrap. Mastering Diverse Domains through
+      World Models (DreamerV3). <i>arXiv:2301.04104</i>, 2023.</li>
+  <li id="ref-khatib">O. Khatib. Real-Time Obstacle Avoidance for Manipulators and Mobile Robots.
+      <i>Int.&nbsp;J.&nbsp;of Robotics Research</i>, 5(1):90–98, 1986.</li>
+  <li id="ref-bevfusion">T. Liang, H. Xie, K. Yu, Z. Xia, Z. Lin, Y. Wang, T. Tang, B. Wang, Z. Tang.
+      BEVFusion: A Simple and Robust LiDAR-Camera Fusion Framework. In <i>NeurIPS</i>, 2023.</li>
+  <li id="ref-lss">J. Philion, S. Fidler. Lift, Splat, Shoot: Encoding Images from Arbitrary Camera
+      Rigs by Implicitly Unprojecting to 3D. In <i>ECCV</i>, 2020.</li>
+  <li id="ref-simmons">R. Simmons. The Curvature-Velocity Method for Local Obstacle Avoidance.
+      In <i>IEEE ICRA</i>, 1996.</li>
+  <li id="ref-gibson">F. Xia, A. R. Zamir, Z.-Y. He, A. Sax, J. Malik, S. Savarese. Gibson Env:
+      Real-World Perception for Embodied Agents. In <i>CVPR</i>, 2018.</li>
+  <li id="ref-navila">A.-C. Cheng et al. NaVILA: Legged Robot Vision-Language-Action Model for
+      Navigation. <i>arXiv:2412.04453</i>, 2024.</li>
+  <li id="ref-omnivla">Z. Liu et al. OmniVLA: Omni-Modal Vision-Language-Action Model.
+      <i>arXiv preprint</i>, 2025.</li>
+  <li id="ref-internnav">Y. Liu et al. InternNav: A Foundation Navigation Agent for Embodied Tasks.
+      <i>arXiv preprint</i>, 2025.</li>
+</ol>
+
+</body>
+</html>

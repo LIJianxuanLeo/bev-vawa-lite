@@ -14,9 +14,9 @@ consequences (collision risk, goal progress, epistemic uncertainty) in latent
 BEV space; a simple analytic fusion rule re-ranks them. The model is trained
 offline on trajectories rolled out from A* experts in **PIB-Nav**, a
 procedural indoor benchmark built inside MuJoCo, and evaluated closed-loop on
-held-out rooms. The full system runs at XX Hz on a consumer laptop (Apple M4,
-no GPU) and contains about YY M parameters — two orders of magnitude fewer
-than comparable embodied-navigation foundation models.
+held-out rooms. The full system runs at ~180 Hz on a consumer laptop (Apple M4, MPS only,
+no discrete GPU) and contains about 1.12 M parameters — two orders of
+magnitude fewer than comparable embodied-navigation foundation models.
 
 ## 1. Introduction
 
@@ -107,7 +107,21 @@ range). Success threshold 0.25 m; collision budget 10; step budget 300.
 
 ### 5.2 Baselines
 
-FPV-BC, BEV-BC, BEV-VA, and an A* + pure-pursuit oracle.
+Four baselines share the evaluation pipeline with our method:
+
+- **A\* + Pure-Pursuit (oracle)**: ideal planner replanning on the ground-
+  truth inflated occupancy grid every step; an upper bound on what the
+  controller can do given perfect perception.
+- **FPV-BC**: front-pixel depth → 3-block CNN → 5-way discrete action +
+  offset regression (no BEV, no VA, no WA).
+- **BEV-BC**: same head as FPV-BC but fed our BEV encoder's latent `z_t`.
+  Isolates the value of the BEV lift alone.
+- **BEV-VA**: BEV latent + our VA multi-waypoint head (K=5 anchors, Best-K
+  classification + Huber offset). I.e. our full model with the WA branch
+  surgically removed. Isolates the value of the WA branch.
+
+All three imitation baselines are trained with the same 20-epoch Stage-A
+recipe as the VA head in our model and evaluated at the same 4 seeds.
 
 ### 5.3 Metrics
 
@@ -115,23 +129,95 @@ Success Rate (SR), SPL, collision rate, path-length ratio, inference latency.
 
 ## 6. Results
 
-See `results/main_table.csv`; figure `results/fig_main_sr_spl.png`. The full
-method improves SR by XX points over BEV-VA (WA branch contribution) and by
-YY points over BEV-BC (candidate-structured action), approaching the A*
-oracle on SPL while running at interactive rates on a laptop.
+Main closed-loop results on PIB-Nav. For the two learned-policy rows we
+report **mean ± std over 4 seeds** (12345, 42, 7, 31337), 100 held-out
+episodes each; A\* rows are deterministic and reported at a single seed.
+See `results/main_table.csv` and `results/fig_main_sr_spl.png`:
+
+| Method                        | SR            | SPL           | Coll          | PLR  | Lat.\,(ms) |
+|-------------------------------|---------------|---------------|---------------|------|------------|
+| A\* Upper Bound (oracle)      | 0.48          | 0.47          | 0.54          | 0.89 | 2.76       |
+| A\* + Safety                  | 0.50          | 0.49          | 0.50          | 0.90 | 2.63       |
+| FPV-BC (mean 4 seeds)         | 0.35 ± 0.03   | 0.34 ± 0.03   | 0.69 ± 0.03   | 0.94 | 1.56       |
+| BEV-BC (mean 4 seeds)         | 0.33 ± 0.04   | 0.32 ± 0.04   | 0.69 ± 0.05   | 0.92 | 4.42       |
+| BEV-VA (mean 4 seeds)         | 0.33 ± 0.03   | 0.32 ± 0.03   | 0.69 ± 0.04   | 0.92 | 4.13       |
+| BEV-VAWA (full, mean 4 seeds) | 0.40 ± 0.05   | 0.39 ± 0.05   | 0.65 ± 0.05   | 0.92 | 5.76       |
+| **BEV-VAWA (full + Safety)**  | **0.49 ± 0.05** | **0.49 ± 0.05** | **0.57 ± 0.06** | 0.92 | 6.11 |
+
+The three imitation baselines cluster tightly at SR ≈ 0.33–0.35,
+essentially indistinguishable from each other at n=100. Moving the
+encoder from raw FPV pixels to the shared BEV latent (FPV-BC → BEV-BC)
+is neutral; adding the VA multi-waypoint head (BEV-BC → BEV-VA) is also
+neutral. It is only when the WA branch contributes risk / progress /
+uncertainty scores into the analytic fusion `Q_k` that SR jumps to 0.40
+± 0.05, and adding the safety layer lifts it further to 0.49 ± 0.05.
+This is the central claim of the paper: the WA branch is the component
+doing load-bearing work — the improvement is not attributable to either
+the BEV lift or the VA head alone.
+
+Although the absolute per-seed SR of the learned policy fluctuates by
+about ±5 pp — an expected consequence of the small 100-episode test set
+and the stochasticity of procedural rooms — the **improvement from the
+reactive safety wrapper is highly consistent: paired ΔSR = +0.093 ±
+0.013 across the four seeds (+8 to +11 pp, never negative).** With
+safety enabled the learned policy matches the reactive-safety A\*
+baseline on SR and reaches within 1 pp of SPL; both learned+safety and
+A\*+safety sit 2–6 pp above the bare A\* controller upper bound because
+the safety layer cuts collisions from ≈0.54–0.65 to ≈0.50–0.57. The
+seed=12345 checkpoint alone reports SR 0.45 → 0.53 (+0.08); treating
+that single-seed number as the headline would overstate the learned
+policy's standalone quality — the safety-layer *improvement*, however, is
+real at every seed we evaluated. See the separate *Stage Report*
+(`paper/stage_report.pdf`) for the detailed safety-layer analysis.
 
 ### 6.1 Ablations
 
-See `results/ablation_table.csv`; figure `results/fig_ablation.png`. Removing
-the WA branch drops SR by ZZ points; removing the uncertainty term drops it
-by UU; shrinking K from 5 to 1 collapses the benefit of candidate structuring;
-shortening rollout H from 3 to 1 hurts primarily on rooms with tight turns.
+Ablations isolate the two non-obvious design choices of the WA branch.
+All runs share the Stage-A checkpoint where applicable; numbers are on
+100 held-out episodes at **seed 12345** (single-seed — see caveat on
+seed variance in the main table above; ablations are interpreted as
+**differences within the same seed** so the per-seed offset cancels).
+See `results/ablation_table.csv`:
+
+| Ablation                      | SR   | SPL  | Coll | ΔSR vs Full |
+|-------------------------------|------|------|------|-------------|
+| Full                          | 0.45 | 0.44 | 0.58 | —           |
+| *no_wa* — fusion γ=δ=0        | 0.39 | 0.38 | 0.63 | −6 pp       |
+| *no_unc* — fusion δ=0         | 0.45 | 0.44 | 0.58 | 0 pp        |
+| *h1* — rollout H=3→1 (retrain)| 0.44 | 0.43 | 0.58 | −1 pp       |
+
+Removing the WA branch entirely drops SR by **6 points**, confirming
+its end-task contribution. Shortening the rollout to H=1 costs only
+**1 point** — the gap is small because the current WA branch has no
+supervision on intermediate rollout latents; adding the `L_dyn`
+objective on the Gibson v2 track (§Future Work) is designed to extend
+this margin. The uncertainty-only ablation (`no_unc`, δ=0) is
+**byte-identical to Full at seed 12345**: the ensemble-variance term
+is not large enough to change candidate rankings at test time.
+Re-weighting or calibrating the ensemble to make δ·û actually
+contribute is a follow-up. Numbers for the K-sweep are deferred
+pending re-evaluation under the corrected metric.
 
 ### 6.2 Efficiency
 
-Full model: ~2.5 M parameters. Single-step forward on Apple M4 MPS: ~20 ms.
-Total training time (Stages A+B+C) on the same laptop: under 6 hours at
-default config.
+Full model: **1.12 M** parameters. Single-step forward on Apple M4
+MPS: **5.54 ms** (≈180 Hz), well above the 10 Hz control loop.
+Total training time (Stages A+B+C on 1000-room dataset, epochs 20/20/8):
+about 3 h on the M4; data generation another ~5.5 h.
+
+### 6.3 Seed-stability protocol
+
+Closed-loop SR on a 100-episode test set of procedural rooms has an
+empirical per-seed standard deviation of ≈0.05 on this benchmark
+(measured on the four seeds listed in §6). We therefore report the two
+learned-policy rows in the main table as mean ± std over 4 seeds, and
+treat single-seed numbers as indicative rather than headline. For the
+ablation table (§6.1) the same seed is reused across all variants so
+per-seed offset cancels; only **ΔSR vs. Full at seed 12345** is
+interpreted as signal. The safety-layer effect (ΔSR = +0.093 ± 0.013,
+σ ≈ 4× smaller than the raw per-seed SR σ) is an explicit example of
+this paired design — the improvement is real even though the absolute
+numbers move around.
 
 ## 7. Conclusion
 
@@ -143,6 +229,29 @@ trains and runs on a consumer laptop while keeping the architectural clarity
 
 ## References
 
-Placeholder — see source plan `bev_vawa_lite_plan_en.md` §14 for the working
-bibliography (InternNav, BEVNav, ADIN, Navigation World Models, WoTE,
-BEV-pretrained world model, OmniVLA, NaVILA, HSSD, ProcTHOR).
+1. P. Anderson, A. Chang, D. S. Chaplot, A. Dosovitskiy, S. Gupta, V. Koltun,
+   J. Kosecka, J. Malik, R. Mottaghi, M. Savva, A. R. Zamir.
+   *On Evaluation of Embodied Navigation Agents.* arXiv:1807.06757, 2018.
+2. J. Borenstein, Y. Koren. *Real-time Obstacle Avoidance for Fast Mobile
+   Robots.* IEEE T-SMC, 19(5):1179–1187, 1989.
+3. A.-C. Cheng et al. *NaVILA: Legged Robot Vision-Language-Action Model
+   for Navigation.* arXiv:2412.04453, 2024.
+4. R. C. Coulter. *Implementation of the Pure Pursuit Path Tracking
+   Algorithm.* CMU-RI-TR-92-01, 1992.
+5. D. Ha, J. Schmidhuber. *World Models.* NeurIPS, 2018.
+6. D. Hafner, J. Pasukonis, J. Ba, T. Lillicrap. *Mastering Diverse Domains
+   through World Models (DreamerV3).* arXiv:2301.04104, 2023.
+7. O. Khatib. *Real-Time Obstacle Avoidance for Manipulators and Mobile
+   Robots.* IJRR, 5(1):90–98, 1986.
+8. T. Liang et al. *BEVFusion: A Simple and Robust LiDAR-Camera Fusion
+   Framework.* NeurIPS, 2023.
+9. Y. Liu et al. *InternNav: A Foundation Navigation Agent for Embodied
+   Tasks.* arXiv preprint, 2025.
+10. Z. Liu et al. *OmniVLA: Omni-Modal Vision-Language-Action Model.*
+    arXiv preprint, 2025.
+11. J. Philion, S. Fidler. *Lift, Splat, Shoot: Encoding Images from
+    Arbitrary Camera Rigs by Implicitly Unprojecting to 3D.* ECCV, 2020.
+12. R. Simmons. *The Curvature-Velocity Method for Local Obstacle
+    Avoidance.* ICRA, 1996.
+13. F. Xia, A. R. Zamir, Z.-Y. He, A. Sax, J. Malik, S. Savarese.
+    *Gibson Env: Real-World Perception for Embodied Agents.* CVPR, 2018.

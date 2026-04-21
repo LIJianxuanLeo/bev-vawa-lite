@@ -13,7 +13,7 @@ from bev_vawa.utils import load_config, get_device
 from bev_vawa.envs import NavEnv
 from bev_vawa.eval.closed_loop import run_episode
 from bev_vawa.eval.metrics import summarize
-from bev_vawa.eval.policies import make_goal_policy, make_astar_policy, load_model_policy
+from bev_vawa.eval.policies import make_goal_policy, make_astar_policy, load_model_policy, wrap_safety
 from bev_vawa.models import FPV_BC, BEV_BC, BEV_VA, BEVVAWA
 
 
@@ -50,6 +50,8 @@ def main():
     ap.add_argument("--results", default="results/main_table.csv")
     ap.add_argument("--method-name", default=None, help="row label in the CSV")
     ap.add_argument("--tiny", action="store_true")
+    ap.add_argument("--safety", action="store_true",
+                    help="wrap the policy with reactive obstacle-avoidance override")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -67,6 +69,8 @@ def main():
             p = make_astar_policy(env.room, cfg)
         else:
             p = policy_obj
+        if args.safety:
+            p = wrap_safety(p, cfg)
         eps.append(run_episode(env, p, cfg))
     env.close()
     summary = summarize(eps)

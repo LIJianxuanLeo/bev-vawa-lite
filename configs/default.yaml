@@ -55,17 +55,32 @@ train:
   batch_size: 64
   lr: 3.0e-4
   weight_decay: 1.0e-5
-  epochs_stage_a: 6
-  epochs_stage_b: 6
-  epochs_stage_c: 3
+  epochs_stage_a: 20
+  epochs_stage_b: 20
+  epochs_stage_c: 8
   grad_clip: 1.0
   num_workers: 0                 # keep low on MPS
 
 data:
-  n_rooms: 200
+  n_rooms: 1000
   samples_per_room: 64
   out_dir: "data/pib_nav"
 
 eval:
   n_episodes: 100
   results_dir: "results"
+
+# Reactive obstacle-avoidance override applied on top of any learned policy
+# when scripts/eval.py is run with ``--safety``. Read by policies.wrap_safety.
+# v3 — APF on forward arc + lateral-sector scrape guard.
+safety:
+  near_m: 0.35                 # d_min < this → strong turn + tapered v (never zero)
+  warn_m: 0.60                 # d_min < this → additive steering correction
+  forward_arc_frac: 0.60       # middle 60% cols = ±27° at FOV=90°
+  row_frac: [0.3, 0.7]         # vertical crop to skip floor / ceiling noise
+  near_forward_frac: 0.30      # v' = max_v * this when d_min < near_m
+  asym_tiebreak: 0.15          # |asym| below this → fall back to policy ω sign
+  # v3 side-sector scrape guard — outer 20% cols each side (±27°..±45°)
+  side_warn_m: 0.40            # side clearance < this → push away from that side
+  side_w_gain: 0.6             # side ω correction strength (× max_ang_vel)
+  side_v_taper: 0.85           # v multiplier when a side is fully close (pinch points)

@@ -26,3 +26,20 @@ dist/
 
 # mujoco runtime
 MUJOCO_LOG.TXT
+
+# intermediate / backup files
+*.bak
+*.prev
+*.pre_baseline
+
+# LaTeX build artifacts (keep .tex and .pdf, drop everything else)
+paper/*.log
+paper/*.aux
+paper/*.out
+paper/*.toc
+paper/*.synctex.gz
+paper/*.fls
+paper/*.fdb_latexmk
+
+# training logs (keep structured summaries in results/ only)
+/logs/

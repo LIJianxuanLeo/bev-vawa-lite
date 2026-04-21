@@ -4,7 +4,7 @@ All policies share the signature ``policy(obs, cfg) -> (v, omega)``.
 """
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 import math
 import numpy as np
 import torch
@@ -12,6 +12,142 @@ import torch
 from ..control.pure_pursuit import pure_pursuit_cmd
 from ..envs.occupancy import rasterize, astar_path, world_to_cell, cell_to_world
 from ..envs.pib_generator import RoomSpec
+
+
+# ---------------------------------------------------------------------------
+# Reactive safety wrapper (method-agnostic)
+# ---------------------------------------------------------------------------
+def wrap_safety(policy: Callable, cfg: dict) -> Callable:
+    """Compose a learned policy with a reactive obstacle-avoidance override.
+
+    v3 — APF on forward arc + **lateral-sector scrape guard**.
+
+    Additions over v2:
+      * The outer image columns (beyond the forward arc, i.e. roughly
+        ±27°..±45° at FOV=90°) are monitored independently. When a side
+        clearance falls below ``side_warn_m`` the wrapper adds an additive
+        ω push *away* from that side, scaled by how close the obstacle is.
+        This catches the side-scrape failure mode that v2 is blind to
+        (forward appears clear, but robot's shoulder is already grazing
+        an obstacle during a turn).
+
+    Per-band behaviour for the forward arc (unchanged from v2):
+
+        d_min >= warn_m   →  cruise, pass (v, ω) through unchanged
+        near_m <= d_min < warn_m
+                          →  keep v, ω' = ω + asym * max_ω * (0.5..1.0)
+        d_min <  near_m   →  v' = max_lin * near_forward_frac,
+                              strong corrective ω (sign from asym, fallback
+                              to policy ω or "turn left" when symmetric)
+
+    Side correction is **always** computed (even when forward is clear) and
+    added after the forward correction, then the total ω is clipped.
+
+    Knobs live under ``cfg['safety']``. Invariant: wrapper never increases
+    |v| or |ω| beyond env limits.
+    """
+    sc = cfg.get("safety", {}) or {}
+    near_m = float(sc.get("near_m", 0.35))
+    warn_m = float(sc.get("warn_m", 0.60))
+    arc_frac = float(sc.get("forward_arc_frac", 0.60))      # ±27° at FOV=90°
+    row_lo, row_hi = sc.get("row_frac", [0.3, 0.7])
+    near_forward_frac = float(sc.get("near_forward_frac", 0.30))
+    asym_tiebreak = float(sc.get("asym_tiebreak", 0.15))
+    # v3: side sector knobs. side_warn_m is tighter than forward warn_m
+    # because sides become a collision risk only when very close.
+    side_warn_m = float(sc.get("side_warn_m", 0.40))
+    side_w_gain = float(sc.get("side_w_gain", 0.6))         # × max_w
+    side_v_taper = float(sc.get("side_v_taper", 0.85))      # v multiplier when side close
+    max_v = float(cfg["env"]["max_lin_vel"])
+    max_w = float(cfg["env"]["max_ang_vel"])
+    min_valid_m = 0.05
+
+    def _side_near(x: np.ndarray, fallback: float = None) -> float:
+        """Robust near-clearance for a depth patch: 5th percentile of
+        valid pixels (ignoring sensor-miss zeros). Falls back to
+        ``fallback`` (default: ``warn_m``) if the patch is empty — i.e.
+        treated as clear."""
+        if fallback is None:
+            fallback = warn_m
+        valid = x > min_valid_m
+        if valid.sum() < 10:
+            return fallback
+        return float(np.percentile(x[valid], 5))
+
+    def _closeness(d: float, warn: float) -> float:
+        """Map a clearance distance to a [0, 1] closeness score.
+        0 = clear (d >= warn), 1 = touching (d <= 0)."""
+        if d >= warn:
+            return 0.0
+        return float(max(0.0, min(1.0, 1.0 - d / max(warn, 1e-6))))
+
+    def safe_policy(obs, cfg_):
+        v, w = policy(obs, cfg_)
+        depth = obs["depth"]
+        if depth is None or depth.size == 0:
+            return v, w
+        H, W = depth.shape
+        r0, r1 = int(H * row_lo), int(H * row_hi)
+        c_lo = int(W * (0.5 - arc_frac / 2.0))
+        c_hi = int(W * (0.5 + arc_frac / 2.0))
+
+        arc = depth[r0:r1, c_lo:c_hi]
+        # v3: outer image columns = side sectors (convention here matches
+        # the existing forward-arc asym: lower col index = robot LEFT).
+        left_side = depth[r0:r1, :c_lo] if c_lo > 0 else None
+        right_side = depth[r0:r1, c_hi:] if c_hi < W else None
+
+        d_left = _side_near(left_side, side_warn_m) if left_side is not None and left_side.size > 0 else side_warn_m
+        d_right = _side_near(right_side, side_warn_m) if right_side is not None and right_side.size > 0 else side_warn_m
+        cl_left = _closeness(d_left, side_warn_m)
+        cl_right = _closeness(d_right, side_warn_m)
+        # obstacle on LEFT (cl_left high) → steer RIGHT (-ω); sign matches
+        # forward-arc convention (+ω = left).
+        w_side = (cl_right - cl_left) * side_w_gain * max_w
+        # gentle v taper when either side is close (robot is threading a gap)
+        side_pressure = max(cl_left, cl_right)
+        v_side_mult = 1.0 - (1.0 - side_v_taper) * side_pressure
+
+        # --- forward arc (v2 logic) ---
+        valid = arc > min_valid_m
+        if not valid.any():
+            # forward blind (all sensor misses): still apply side correction
+            w_new = float(np.clip(w + w_side, -max_w, max_w))
+            return float(v) * v_side_mult, w_new
+
+        d_min = float(arc[valid].min())
+        if d_min >= warn_m:
+            # cruise, but side correction still active
+            w_new = float(np.clip(w + w_side, -max_w, max_w))
+            return float(v) * v_side_mult, w_new
+
+        mid = max(1, arc.shape[1] // 2)
+        l_near = _side_near(arc[:, :mid])
+        r_near = _side_near(arc[:, mid:])
+        asym = (l_near - r_near) / max(warn_m, 1e-6)
+        asym = float(np.clip(asym, -1.0, 1.0))
+        urgency = max(0.0, min(1.0, (warn_m - d_min) / max(warn_m - near_m, 1e-6)))
+        w_corr = asym * max_w * (0.5 + 0.5 * urgency)
+
+        if d_min < near_m:
+            if abs(asym) < asym_tiebreak:
+                direction = 1.0 if w >= 0 else -1.0
+                if abs(w) < 0.05:
+                    direction = 1.0
+                w_corr = direction * max_w * 0.75
+            else:
+                w_corr = float(np.sign(asym)) * max_w * 0.9
+            v_new = max_v * near_forward_frac
+        else:
+            v_new = float(v)                                 # warn band: keep v
+
+        # Combine forward + side corrections; side taper applies multiplicatively
+        # to the already-computed v_new so we slow slightly further in pinch points.
+        v_new = v_new * v_side_mult
+        w_new = float(np.clip(w + w_corr + w_side, -max_w, max_w))
+        return v_new, w_new
+
+    return safe_policy
 
 
 def make_goal_policy():

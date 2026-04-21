@@ -1,0 +1,5 @@
+ablation,SR,SPL,CollisionRate,PathLenRatio,LatencyMs,notes
+Full,0.45,0.4387,0.58,0.9219,5.54,seed=12345 n=100
+no_wa,0.39,0.3787,0.63,0.9209,6.00,fusion gamma=delta=eta=0 (reuse full ckpt)
+no_unc,0.45,0.4387,0.58,0.9219,5.57,fusion delta=0 only; byte-identical to Full => unc term inactive at test time
+h1,0.44,0.4288,0.58,0.9145,5.03,rollout horizon H=3 -> 1 (Stage B+C retrained)
