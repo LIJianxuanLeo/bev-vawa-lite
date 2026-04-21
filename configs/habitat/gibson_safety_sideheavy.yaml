@@ -1,0 +1,19 @@
+# Gibson Habitat — side-sector-dominant safety variant.
+#
+# Keeps the forward arc roughly at PIB-Nav scale but heavily emphasises
+# the side-sector scrape guard. Motivation: in Gibson's narrow corridors
+# the policy rarely faces a head-on wall, but wall-grazing / doorway
+# traversals are the dominant failure mode. A strong side push with a
+# modestly tightened forward arc should cover that regime.
+inherit: ./gibson.yaml
+
+safety:
+  near_m: 0.20
+  warn_m: 0.35
+  forward_arc_frac: 0.45        # ≈ ±20°
+  row_frac: [0.3, 0.7]
+  near_forward_frac: 0.55
+  asym_tiebreak: 0.15
+  side_warn_m: 0.30             # generous side threshold
+  side_w_gain: 1.5              # aggressive sideways push
+  side_v_taper: 0.70

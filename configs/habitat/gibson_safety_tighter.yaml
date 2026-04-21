@@ -1,0 +1,18 @@
+# Gibson Habitat — aggressive tightening of reactive-safety knobs.
+#
+# ~3x tighter than PIB-Nav defaults. Sacrifices some nominal speed and
+# risk tolerance in exchange for the wrapper being active at Gibson's
+# narrowest corridors. Use this as the upper-aggressiveness anchor of
+# the safety-parameter sweep.
+inherit: ./gibson.yaml
+
+safety:
+  near_m: 0.12                  # 0.35 / ~3
+  warn_m: 0.20                  # 0.60 / 3
+  forward_arc_frac: 0.35        # ≈ ±16°
+  row_frac: [0.3, 0.7]
+  near_forward_frac: 0.40
+  asym_tiebreak: 0.15
+  side_warn_m: 0.15
+  side_w_gain: 1.2              # strong sideways push near walls
+  side_v_taper: 0.65            # sharper v reduction when pinched
