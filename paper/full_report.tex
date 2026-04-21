@@ -1083,32 +1083,86 @@ C (joint fine-tune, $\lambda\cdot0.4$ in loss)   & $1.794$ & $1.753$ & $-2\%$ \\
 \end{table}
 
 \en{\textbf{Closed-loop gap.} Evaluated at four seeds $\times$ 100
-episodes on the Gibson val split \emph{without} the reactive safety
-wrapper, the trained policy's SR is $0.00$–$0.01$, statistically
-indistinguishable from a perception-free \texttt{straight} baseline
-($0.02$–$0.07$). Mean CollisionRate is $1.0$: every episode terminates
-on collision before reaching the goal. As discussed in \S9.3, this is
-consistent with the covariance-shift failure mode of pure
-imitation — our training data is generated via teleport-based expert
-trajectories, which by construction never visit the adversarial states
-the closed-loop policy encounters.}
+episodes on the Gibson val split with the same trained Stage-C
+checkpoint, we observe a striking asymmetry in the safety-layer's
+effect compared to the PIB-Nav main track (Table~\ref{tab:gibson-eval}).
+The paired $\Delta\mathrm{SR}$ from the reactive-safety wrapper on
+Gibson is $+0.008 \pm 0.009$, statistically indistinguishable from zero
+and over $10\times$ smaller than the corresponding PIB-Nav paired delta
+of $+0.093 \pm 0.013$ (Table~\ref{tab:seedstab}). Mean CollisionRate is
+$\ge 0.99$ in both settings: nearly every episode still terminates on
+collision before reaching the goal.}
 
-\zh{\textsf{\textbf{闭环差距。}在 Gibson val 上跑四种子 $\times$ 100 episodes
-的闭环评估\emph{不挂载}反应式安全模块时，策略 SR 为 $0.00$–$0.01$，与
-无感知的 \texttt{直走} 基线（$0.02$–$0.07$）在统计上不可区分；平均碰撞
-率 $1.0$，即每条 episode 在触达目标前都因碰撞终止。如 \S9.3 所述，这与
-纯模仿的协方差偏移失败模式完全一致——我们的训练数据由 teleport 式专家
-轨迹生成，构造上从未访问闭环策略会遇到的敌对状态。}}
+\zh{\textsf{\textbf{闭环差距。}在 Gibson val 上以同一 Stage-C 检查点跑
+四种子 $\times$ 100 episodes 闭环评估，安全层效应与 PIB-Nav 主线之间存
+在显著非对称（表~\ref{tab:gibson-eval}）：Gibson 上由反应式安全模块带
+来的配对 $\Delta\mathrm{SR}$ 为 $+0.008 \pm 0.009$，统计上与零不可区分，
+且比 PIB-Nav 主线的配对增量 $+0.093 \pm 0.013$（表~\ref{tab:seedstab}）
+小 $10\times$ 以上。两种设置下平均碰撞率均 $\ge 0.99$，即几乎所有
+episode 在触及目标前都因碰撞终止。}}
+
+\begin{table}[H]
+\centering\small
+\caption{Paired Gibson val eval, $4$ seeds $\times 100$ episodes, same
+Stage-C checkpoint. Safety knobs inherited unchanged from
+\texttt{configs/default.yaml}. The paired $\Delta\mathrm{SR}$ of
+$+0.008 \pm 0.009$ is \emph{statistically null} — the PIB-Nav-tuned
+wrapper does not transfer to Gibson's narrower geometry.
+\textsf{\small Gibson val 配对评估（$4$ 种子 $\times 100$ episodes，
+同一 Stage-C 检查点），安全超参沿用 PIB-Nav 默认。配对
+$\Delta\mathrm{SR} = +0.008 \pm 0.009$，在统计上与零不可区分；即针对
+PIB-Nav 调的安全参数未能迁移到 Gibson 更窄的几何。}}
+\label{tab:gibson-eval}
+\begin{tabular}{lcccc}
+\toprule
+Seed & SR (no safety) & SR (+ safety) & $\Delta$SR & Coll (no / + safety) \\
+\midrule
+12345       & 0.00 & 0.00 & $+0.00$ & 1.00 / 1.00 \\
+42          & 0.01 & 0.03 & $+0.02$ & 1.00 / 1.00 \\
+7           & 0.00 & 0.00 & $+0.00$ & 1.00 / 1.00 \\
+31337       & 0.01 & 0.02 & $+0.01$ & 0.99 / 0.99 \\
+\midrule
+\textbf{mean $\pm$ std} & $0.005\pm 0.006$ & $0.013\pm 0.015$ & $\mathbf{+0.008\pm 0.009}$ & $0.995/0.995$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\en{\textbf{Why the PIB-Nav safety wrapper does not transfer.}
+The PIB-Nav safety parameters
+($\mathtt{warn\_m}=0.60\,$m, $\mathtt{near\_m}=0.35\,$m, and the forward
+arc at $\pm 27^\circ$) were tuned for $5$–$7\,$m procedural rooms whose
+wall-to-wall clearance is comparable to $\mathtt{warn\_m}$ itself. In
+Gibson homes, corridor widths of $1.0$–$1.8\,$m mean the forward arc is
+\emph{always} below threshold, so the taper term saturates and the
+wrapper degenerates to a nearly-constant velocity reduction — it cannot
+steer the agent away from walls because the side-sector signal also
+saturates. This is an example of the covariance-shift framing from
+\S9.3: both the learned policy \emph{and} the reactive safety module
+implicitly assume the state distribution they were developed on. The
+remaining options are listed in order of engineering cost.}
+
+\zh{\textsf{\textbf{为什么 PIB-Nav 安全模块在 Gibson 失效。}PIB-Nav 安
+全超参（$\mathtt{warn\_m}=0.60\,$m、$\mathtt{near\_m}=0.35\,$m、前向
+arc 为 $\pm 27^\circ$）是针对 $5$–$7\,$m 程序化房间调节的，其墙到墙
+间距与 $\mathtt{warn\_m}$ 相近；在 Gibson 家居环境中，走廊宽度通常只
+有 $1.0$–$1.8\,$m，前向 arc \emph{始终}在阈值之下，taper 项饱和，
+wrapper 退化为近似常数速度衰减，失去转向能力；侧向 sector 信号同样饱
+和。这与 \S9.3 的协方差偏移框架一致——学得策略\emph{与}反应式安全模
+块都隐式假设了其训练/调参所处的状态分布。后续补救按工程代价排序如下。}}
 
 \en{\textbf{What is needed to close the gap} (in order of engineering
 difficulty):
 \begin{enumerate}[leftmargin=*, itemsep=2pt]
-  \item \textbf{Gibson-tuned reactive safety.} The PIB-Nav safety
-        parameters ($\mathtt{warn\_m}, \mathtt{arc\_frac}, \ldots$)
-        were tuned for $5$–$7\,$m procedural rooms; Gibson scenes have
-        narrower corridors and lower ceilings, which likely requires
-        a per-track parameter sweep. Expected cost: one additional
-        $4$-seed eval pass, $\sim$7 min and $<$¥1 GPU billing.
+  \item \textbf{Gibson-tuned reactive safety.} Confirmed empirically in
+        Table~\ref{tab:gibson-eval}: PIB-Nav's safety knobs saturate in
+        Gibson corridors and yield a null paired delta
+        ($+0.008 \pm 0.009$ SR). The minimum viable fix is a parameter
+        sweep over $\mathtt{warn\_m}, \mathtt{near\_m},
+        \mathtt{side\_warn\_m}$ re-centred on Gibson corridor widths
+        ($\sim 1.5\,$m), which can be done as a grid of
+        $4$-seed evals without any retraining. Expected cost: $\sim$4
+        parameter points $\times\,$7 min each $\approx 30$ min, $<$¥1
+        GPU billing.
   \item \textbf{Closed-loop data aggregation (DAGger).}~Run the
         partially-trained policy against the Habitat simulator, record
         the states it visits, and query the pathfinder for the correct

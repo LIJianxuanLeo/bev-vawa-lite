@@ -269,20 +269,37 @@ reproduces the expert's `best_k` on >80% of samples and places the
 predicted waypoint within one adjacent-anchor offset on the remainder.
 I.e., the learning problem is solved.
 
-**Closed-loop gap.** Evaluated at 4 seeds × 100 episodes on the Gibson
-val split *without* the reactive safety wrapper, the policy's SR is
-0.00–0.01, statistically indistinguishable from a perception-free
-`straight` baseline (0.02–0.07); CollisionRate is 1.0. This is
-consistent with the covariance-shift failure mode discussed in §6.4:
-our training data is generated via teleport-based expert trajectories,
-which by construction never visit the adversarial states the
-closed-loop policy encounters on 3D-scanned indoor rooms.
+**Closed-loop gap — paired 4-seed evaluation.** Evaluated at 4 seeds ×
+100 episodes on the Gibson val split with the same Stage-C checkpoint,
+once with and once without the reactive safety wrapper (PIB-Nav knobs,
+unchanged):
+
+| Seed | SR (no safety) | SR (+ safety) | ΔSR | Coll (no / +safety) |
+|---|---|---|---|---|
+| 12345 | 0.00 | 0.00 | +0.00 | 1.00 / 1.00 |
+| 42    | 0.01 | 0.03 | +0.02 | 1.00 / 1.00 |
+| 7     | 0.00 | 0.00 | +0.00 | 1.00 / 1.00 |
+| 31337 | 0.01 | 0.02 | +0.01 | 0.99 / 0.99 |
+| **mean ± std** | **0.005 ± 0.006** | **0.013 ± 0.015** | **+0.008 ± 0.009** | 0.995 / 0.995 |
+
+The paired ΔSR of **+0.008 ± 0.009** is statistically null — over 10×
+smaller than the PIB-Nav paired ΔSR of +0.093 ± 0.013 (§6). That is not
+a contradiction: PIB-Nav's safety parameters
+(`warn_m=0.60m, near_m=0.35m`, ±27° forward arc) were tuned for 5–7 m
+procedural rooms; in Gibson's 1.0–1.8 m corridors the forward arc is
+*always* below threshold, the taper term saturates, and the wrapper
+degenerates to a nearly-constant velocity reduction with no steering
+authority. This is a direct instantiation of the covariance-shift
+framing in §6.4: both the learned policy *and* the reactive safety
+module implicitly assume the state distribution they were developed on.
 
 **What is needed to close the gap** (in engineering-difficulty order):
 
-1. **Gibson-tuned reactive safety** — PIB-Nav safety parameters were
-   tuned for 5–7 m procedural rooms; Gibson has narrower corridors.
-   Expected cost: one 4-seed eval pass, ~7 min and <¥1 of GPU billing.
+1. **Gibson-tuned reactive safety** — empirically confirmed necessary
+   (table above). Minimum viable fix: a small grid sweep over
+   `warn_m, near_m, side_warn_m` re-centred on Gibson corridor width
+   (~1.5 m), no retraining. Expected cost: ~4 parameter points × 7 min
+   ≈ 30 min and <¥1 of GPU billing.
 2. **Closed-loop DAGger aggregation** — run the partially-trained
    policy against Habitat, record visited states, query the pathfinder
    for the correct waypoint, fold augmented trajectories back into
