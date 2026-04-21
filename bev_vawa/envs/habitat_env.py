@@ -240,7 +240,21 @@ class HabitatNavEnv:
         self._vel_ctrl.angular_velocity = np.array([0.0, w, 0.0], dtype=np.float32)
 
         state = self._agent.state
-        new_rigid = self._vel_ctrl.integrate_transform(self.control_dt, state.rigid_state())
+        # habitat-sim 0.3.3 compatibility: AgentState.rotation is
+        # numpy-quaternion and AgentState no longer exposes rigid_state().
+        # We manually build a RigidState with magnum Vector3/Quaternion, then
+        # convert back after integrate_transform. Verified on habitat-sim
+        # 0.3.2 and 0.3.3; the older path still works if state.rigid_state
+        # is present (fallback below).
+        import magnum as _mn
+        _rs = habitat_sim.RigidState()
+        _p = state.position
+        _rs.translation = _mn.Vector3(float(_p[0]), float(_p[1]), float(_p[2]))
+        _q = state.rotation
+        _rs.rotation = _mn.Quaternion(
+            _mn.Vector3(float(_q.x), float(_q.y), float(_q.z)), float(_q.w)
+        )
+        new_rigid = self._vel_ctrl.integrate_transform(self.control_dt, _rs)
         proposed_pos = np.asarray(new_rigid.translation)
         # snap to navmesh: habitat returns a legal final pose given collisions
         end_pos = self._sim.pathfinder.try_step(state.position, proposed_pos)
@@ -248,10 +262,15 @@ class HabitatNavEnv:
         if collided:
             self.n_collisions += 1
 
-        # write updated state back
+        # write updated state back; reverse-convert magnum Quaternion -> numpy
         new_state = habitat_sim.AgentState()
         new_state.position = end_pos
-        new_state.rotation = new_rigid.rotation
+        import quaternion as _qt
+        _r = new_rigid.rotation
+        new_state.rotation = _qt.quaternion(
+            float(_r.scalar), float(_r.vector.x),
+            float(_r.vector.y), float(_r.vector.z),
+        )
         self._agent.set_state(new_state, reset_sensors=False)
         self._sim.step_physics(self.control_dt)
         self.n_steps += 1

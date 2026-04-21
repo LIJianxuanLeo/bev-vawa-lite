@@ -23,8 +23,14 @@ def train_stage_a(cfg: dict, data_dir: str, out_ckpt: str, epochs: int | None = 
     set_seed(cfg["seed"])
     device = get_device()
     ds = NavShardDataset(data_dir, depth_max=cfg["env"]["depth_max_m"])
+    # persistent_workers + prefetch only make sense when workers > 0; otherwise
+    # PyTorch errors out. This matches profiling that gave an 80x epoch-time
+    # speedup on the Gibson Habitat track (docs/gibson_remote_run.md).
+    _dl_extra = dict(persistent_workers=True, pin_memory=True, prefetch_factor=4) \
+        if cfg["train"]["num_workers"] > 0 else {}
     dl = DataLoader(ds, batch_size=cfg["train"]["batch_size"], shuffle=True,
-                    num_workers=cfg["train"]["num_workers"], drop_last=False)
+                    num_workers=cfg["train"]["num_workers"], drop_last=False,
+                    **_dl_extra)
 
     model = build_model(cfg).to(device)
     opt = torch.optim.AdamW(

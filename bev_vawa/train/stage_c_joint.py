@@ -21,8 +21,11 @@ def train_stage_c(cfg: dict, data_dir: str, in_ckpt: str, out_ckpt: str,
     set_seed(cfg["seed"] + 2)
     device = get_device()
     ds = NavShardDataset(data_dir, depth_max=cfg["env"]["depth_max_m"])
+    # See stage_a_va.py for rationale of the extra DataLoader knobs.
+    _dl_extra = dict(persistent_workers=True, pin_memory=True, prefetch_factor=4) \
+        if cfg["train"]["num_workers"] > 0 else {}
     dl = DataLoader(ds, batch_size=cfg["train"]["batch_size"], shuffle=True,
-                    num_workers=cfg["train"]["num_workers"])
+                    num_workers=cfg["train"]["num_workers"], **_dl_extra)
 
     model = build_model(cfg).to(device)
     state = torch.load(in_ckpt, map_location=device, weights_only=False)

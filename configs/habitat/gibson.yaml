@@ -58,7 +58,11 @@ train:
   epochs_stage_b: 20
   epochs_stage_c: 8
   grad_clip: 1.0
-  num_workers: 4
+  # 8 matches most cloud-GPU boxes (~10-16 cores). Combined with the
+  # persistent_workers + cache_size=128 patches in the dataloader, this
+  # delivers the 80x epoch-time speedup documented in
+  # docs/gibson_remote_run.md.
+  num_workers: 8
 
 gibson:
   samples_per_episode: 16
