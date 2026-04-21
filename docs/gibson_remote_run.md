@@ -280,6 +280,20 @@ for SEED in 12345 42 7 31337; do
         --method-name "BEV-VAWA Gibson seed=$SEED" \
         --results /root/data/runs/gibson/main_table_habitat.csv
 done
+
+# Optional: same eval with the reactive safety wrapper enabled
+# (adds "+safety" to the CSV row label automatically). Produces the
+# companion row used in §10.2's paired-delta analysis.
+for SEED in 12345 42 7 31337; do
+    $HP/python scripts/eval_habitat.py \
+        --config configs/habitat/gibson.yaml \
+        --scenes "${VAL_SCENES[@]}" \
+        --policy bev_vawa --ckpt /root/data/runs/gibson/stage_c.pt \
+        --n-episodes 100 --seed $SEED \
+        --method-name "BEV-VAWA Gibson seed=$SEED" \
+        --safety \
+        --results /root/data/runs/gibson/main_table_habitat.csv
+done
 ```
 
 ---

@@ -45,17 +45,26 @@ def _expand(patterns):
 
 def _build_policy(args, cfg, device):
     if args.policy == "straight":
-        return lambda obs, cfg: (cfg["env"]["max_lin_vel"], 0.0)
-    if args.policy in MODEL_MAP:
+        p = lambda obs, cfg: (cfg["env"]["max_lin_vel"], 0.0)
+    elif args.policy in MODEL_MAP:
         assert args.ckpt, "--ckpt required for model policies"
         cls = MODEL_MAP[args.policy]
         state = torch.load(args.ckpt, map_location=device, weights_only=False)
         model = cls(cfg).to(device)
         model.load_state_dict(state["model"], strict=False)
         from bev_vawa.eval.policies import make_model_policy
-        return make_model_policy(model, device, cfg, use_wa=(args.policy == "bev_vawa"))
+        p = make_model_policy(model, device, cfg, use_wa=(args.policy == "bev_vawa"))
+    else:
+        raise ValueError(args.policy)
 
-    raise ValueError(args.policy)
+    if getattr(args, "safety", False):
+        # Reactive obstacle-avoidance wrapper. Uses forward + side-sector
+        # depth clearances to override (v, omega) near collisions; never
+        # raises v. Matches the PIB-Nav eval path bit-for-bit so Habitat
+        # numbers are directly comparable to the main table.
+        from bev_vawa.eval.policies import wrap_safety
+        p = wrap_safety(p, cfg)
+    return p
 
 
 def _run_one_episode(env, policy, cfg) -> dict:
@@ -103,6 +112,9 @@ def main():
     ap.add_argument("--method-name", default=None)
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--tiny", action="store_true")
+    ap.add_argument("--safety", action="store_true",
+                    help="wrap the policy with the reactive obstacle-avoidance "
+                         "override (same wrapper as the PIB-Nav eval).")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -140,7 +152,11 @@ def main():
     if out.exists():
         with open(out, "r") as f:
             rows = list(csv.DictReader(f))
-    label = args.method_name or args.policy
+    # auto-suffix with "+safety" so a single results CSV can hold both
+    # with- and without-safety rows for the same policy/seed without
+    # silently overwriting.
+    base_label = args.method_name or args.policy
+    label = f"{base_label} +safety" if args.safety and "+safety" not in base_label else base_label
     row = {"method": label, "SR": summary["SR"], "SPL": summary["SPL"],
            "CollisionRate": summary["CollisionRate"],
            "PathLenRatio": summary["PathLenRatio"], "LatencyMs": summary["LatencyMs"]}
