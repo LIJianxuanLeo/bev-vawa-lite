@@ -118,12 +118,6 @@ class HabitatNavEnv:
         self._sim = None
         self._agent = None
         self._vel_ctrl = None
-        self._build_sim()
-
-        self._goal_xyz: Optional[np.ndarray] = None   # world-frame goal (3,)
-        self._shortest_dist: float = float("nan")     # geodesic at reset
-        self.n_steps = 0
-        self.n_collisions = 0
 
         # --- discrete-action mode (Gibson / HM3D convention) -----------
         # When ``env.discrete_actions`` is true in the config, ``step()``
@@ -132,6 +126,9 @@ class HabitatNavEnv:
         # stop}. This bypasses the navmesh per-step snapback failure mode
         # (see docs/gibson_remote_run.md) that inflates CollisionRate on
         # 3D-scanned rooms.
+        # NOTE: these attributes are read by ``_build_sim`` (sensor
+        # registration + action-space wiring), so they MUST be set before
+        # ``self._build_sim()`` below.
         self._discrete_actions = bool(env_cfg.get("discrete_actions", False))
         # Per-action magnitudes: 0.25 m / 10 deg are the Habitat Challenge
         # defaults and are known to produce well-calibrated SR numbers.
@@ -141,6 +138,13 @@ class HabitatNavEnv:
         self._use_semantic = bool(env_cfg.get("use_semantic", False))
         self._semantic_classes = int(env_cfg.get("semantic_classes", 16))
         self._semantic_lut = None  # lazy-built int32 lookup table (see _render_semantic)
+
+        self._build_sim()
+
+        self._goal_xyz: Optional[np.ndarray] = None   # world-frame goal (3,)
+        self._shortest_dist: float = float("nan")     # geodesic at reset
+        self.n_steps = 0
+        self.n_collisions = 0
 
     # -------------------------------------------------------------- simulator
     def _build_sim(self) -> None:
