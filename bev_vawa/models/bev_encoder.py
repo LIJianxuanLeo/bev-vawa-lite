@@ -36,6 +36,7 @@ class BEVEncoder(nn.Module):
         use_semantic: bool = False,
         semantic_classes: int = 16,
         semantic_feat_dim: int = 64,
+        use_geometric_lift: bool = True,
     ) -> None:
         super().__init__()
         self.latent_dim = int(latent_dim)
@@ -43,18 +44,31 @@ class BEVEncoder(nn.Module):
         self.use_semantic = bool(use_semantic)
         self.semantic_classes = int(semantic_classes)
         self.semantic_feat_dim = int(semantic_feat_dim)
-        self.lift = GeometryLift(
-            grid_size=grid_size,
-            bev_range=bev_range,
-            fov_deg=fov_deg,
-            depth_max_m=depth_max_m,
-            channels_enabled=channels_enabled,
-            goal_sector_sigma_rad=goal_sector_sigma_rad,
-        )
+        # Flag for the BEV ablation (see configs/ablations/flat_encoder.yaml).
+        # When False, the geometric unprojection is skipped and the CNN
+        # operates directly on a 1-channel pooled depth map resampled to
+        # ``grid_size x grid_size``. This is the "flat" control variant
+        # used to validate the claim that metric BEV is necessary —
+        # parameter count differs by only ~1,600 (first Conv2d's in-channel
+        # 3 vs 1), so any SR gap is attributable to the representation.
+        self.use_geometric_lift = bool(use_geometric_lift)
+        if self.use_geometric_lift:
+            self.lift = GeometryLift(
+                grid_size=grid_size,
+                bev_range=bev_range,
+                fov_deg=fov_deg,
+                depth_max_m=depth_max_m,
+                channels_enabled=channels_enabled,
+                goal_sector_sigma_rad=goal_sector_sigma_rad,
+            )
+        else:
+            self.lift = None
         c1, c2, c3 = cnn_channels
-        bev_channels = 3
+        # 3-channel (occ / free / goal-prior) when geometric lift is on;
+        # 1-channel (raw pooled depth) for the flat ablation.
+        in_channels = 3 if self.use_geometric_lift else 1
         self.bev_cnn = nn.Sequential(
-            nn.Conv2d(bev_channels, c1, 3, stride=1, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, c1, 3, stride=1, padding=1), nn.ReLU(inplace=True),
             nn.Conv2d(c1, c2, 3, stride=2, padding=1), nn.ReLU(inplace=True),       # /2
             nn.Conv2d(c2, c3, 3, stride=2, padding=1), nn.ReLU(inplace=True),       # /4
         )
@@ -106,7 +120,17 @@ class BEVEncoder(nn.Module):
 
     def encode_single(self, depth: torch.Tensor, goal: torch.Tensor,
                       semantic: "torch.Tensor | None" = None) -> torch.Tensor:
-        bev = self.lift(depth, goal)                       # (B, 3, G, G)
+        if self.use_geometric_lift:
+            bev = self.lift(depth, goal)                   # (B, 3, G, G)
+        else:
+            # Flat ablation: 1-channel pooled depth at the same grid size
+            # as the BEV variant, so the downstream CNN / pool / FC stack
+            # is identical and the only difference is the representation.
+            # Goal is injected only through the final ``input_proj`` below,
+            # not via the CNN spatial map — this is the deliberate
+            # disadvantage of the flat variant that the BEV branch
+            # receives via the goal_prior channel.
+            bev = F.adaptive_avg_pool2d(depth, (self.grid_size, self.grid_size))
         f = self.bev_cnn(bev)
         z = self.bev_pool(f).flatten(1)
         z = self.fc_pool(z)

@@ -46,6 +46,7 @@ class BEVVAWA(nn.Module):
             use_semantic=bool(bev.get("use_semantic", False)),
             semantic_classes=int(bev.get("semantic_classes", 16)),
             semantic_feat_dim=int(bev.get("semantic_feat_dim", 64)),
+            use_geometric_lift=bool(bev.get("use_geometric_lift", True)),
         )
         self.va = VAHead(latent_dim=bev["latent_dim"], n_candidates=va["n_candidates"])
         self.wa = WAHead(

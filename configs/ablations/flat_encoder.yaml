@@ -1,0 +1,10 @@
+# BEV ablation — controls for the claim "geometric BEV is the right shared
+# representation" (§1 Contribution 1, §3.1). Identical to the default
+# BEV-VAWA configuration except that the geometric depth-unprojection is
+# disabled: the encoder's CNN operates directly on a 1-channel pooled
+# depth map (resized to the same grid_size). Parameter count differs by
+# only ~1,600 (first Conv2d in-channel 3 vs 1), so any SR gap between
+# this variant and the default can be attributed to the representation.
+inherit: ../default.yaml
+bev:
+  use_geometric_lift: false
