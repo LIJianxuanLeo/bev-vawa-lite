@@ -40,29 +40,39 @@ class NavShardDataset(Dataset):
         self.depth_max = float(depth_max)
         self._index: list[tuple[int, int]] = []
         self._anchors = None
-        # Schema detection: v1 shards lack 'schema_version' and the v2-only
-        # keys. We record the per-shard flag so __getitem__ can expose extra
-        # tensors without breaking v1 datasets.
+        # Schema detection:
+        #   v1 — PIB-Nav / MuJoCo; no schema_version, no v2/v3 keys
+        #   v2 — Gibson teleport; schema_version=2, has future_depth +
+        #        cand_deadend
+        #   v3 — HM3D / DAGger with semantic; schema_version=3, has v2
+        #        keys + semantic (H, W) int map and/or future_semantic
+        #        (H_future, Hi, Wi) int map
+        # Per-shard flags let __getitem__ emit extra tensors without
+        # breaking older datasets.
         self._schema_v2: list[bool] = []
+        self._schema_v3: list[bool] = []
         for si, p in enumerate(self.shards):
             with np.load(p) as z:
                 n = z["depth"].shape[0]
                 if self._anchors is None:
                     self._anchors = z["anchors"].astype(np.float32)
+                ver = int(z["schema_version"].item()) if "schema_version" in z.files else 1
                 v2 = (
-                    "schema_version" in z.files
-                    and int(z["schema_version"].item()) >= 2
+                    ver >= 2
                     and "future_depth" in z.files
                     and "cand_deadend" in z.files
                 )
+                v3 = v2 and ver >= 3 and "semantic" in z.files
             self._schema_v2.append(bool(v2))
+            self._schema_v3.append(bool(v3))
             for li in range(n):
                 self._index.append((si, li))
         self._cache: dict[int, dict] = {}
-        # Aggregate flag — the trainer uses this to decide whether it can
-        # train the dynamics / dead-end losses.
+        # Aggregate flags — the trainer uses these to decide whether it
+        # can train the corresponding losses.
         self.has_future = all(self._schema_v2)
         self.has_deadend = all(self._schema_v2)
+        self.has_semantic = all(self._schema_v3)
 
     def __len__(self) -> int:
         return len(self._index)
@@ -120,4 +130,14 @@ class NavShardDataset(Dataset):
             sample["cand_deadend"] = torch.from_numpy(
                 shard["cand_deadend"][li].astype(np.float32)
             )                                                                     # (K,)
+        # v3 extras — semantic label maps, only on HM3D / DAGger shards with
+        # schema_version >= 3. Stored as int8 class labels on disk (not
+        # one-hot) to keep shard size manageable; the encoder one-hots them
+        # on-the-fly.
+        if self._schema_v3[si]:
+            sem = shard["semantic"][li].astype(np.int64)                         # (H, W)
+            sample["semantic"] = torch.from_numpy(sem)
+            if "future_semantic" in shard:
+                fsem = shard["future_semantic"][li].astype(np.int64)             # (H_future, H, W)
+                sample["future_semantic"] = torch.from_numpy(fsem)
         return sample

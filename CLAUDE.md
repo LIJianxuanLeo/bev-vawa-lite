@@ -167,11 +167,38 @@ CSV / PNG / checkpoint in `results/` and `runs/`:
 1. PIB-Nav cross-seed table for both `full` and `full+safety` — ✅ already have
 2. Ablations for `no_wa`, `no_unc`, `h1` — ✅ already have
 3. Baselines FPV-BC / BEV-BC / BEV-VA at 4 seeds — ✅ already have
-4. Gibson Habitat closed-loop eval at 4 seeds **with `--safety`** — ⏳ pending next remote-GPU session
-5. Optional but desired: Gibson safety-parameter sweep (one extra 4-seed pass) — ⏳ pending
+4. Gibson Habitat closed-loop eval at 4 seeds **with `--safety`** — ✅ already have
+5. Gibson safety-parameter sweep (4 variants × 4 seeds) — ✅ already have
+6. Gibson DAGger-1 paired eval — ✅ already have
 
-When 1–4 are all satisfied, you (Claude) may start `journal.tex`. Until
-then, keep all progress in `full_report.tex`.
+**Optional Gibson / HM3D uplift track** (in-repo tooling is ready; results
+pending next remote-GPU sessions):
+
+7. **Discrete-action interface** — `configs/habitat/gibson.yaml` now sets
+   `env.discrete_actions: true`. Expected Gibson/HM3D SR ~0.10-0.20
+   (vs. baseline 0.005). Enabled automatically on next Stage-C eval.
+8. **Learned collision head** — `configs/habitat/gibson.yaml` sets
+   `wa.enable_coll_head: true`, `wa.lambda_coll_head: 0.3`,
+   `fusion.mu: 1.5`. Active on any retraining from scratch.
+9. **Semantic-mask perception** — `configs/habitat/hm3d.yaml` is a new
+   HM3D-specific config with `env.use_semantic: true` and
+   `bev.use_semantic: true`. Requires HM3D v0.2 + pointnav_hm3d_v1
+   download (see file header). Expected SR ~+10pp over #7+#8.
+10. **DAGger β-schedule (3 rounds)** — `scripts/run_dagger_iteration.sh`
+    accepts a second arg `beta`:
+      ```
+      bash scripts/run_dagger_iteration.sh iter1 0.8
+      CKPT_IN=/root/data/runs/gibson_dagger_iter1/stage_c.pt \
+          bash scripts/run_dagger_iteration.sh iter2 0.4
+      CKPT_IN=/root/data/runs/gibson_dagger_iter2/stage_c.pt \
+          bash scripts/run_dagger_iteration.sh iter3 0.0
+      ```
+    Canonical DAGger remedy for covariance shift; expected
+    SR 0.30-0.45 on top of #7+#8+#9.
+
+When 1–6 are all satisfied, you (Claude) may start `journal.tex`. Results
+from 7–10 enrich §10 but are not blocking; the paper's Gibson negative
+result + mechanistic analysis already stands on 1–6.
 
 ---
 

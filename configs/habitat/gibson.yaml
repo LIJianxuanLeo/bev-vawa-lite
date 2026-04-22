@@ -20,6 +20,19 @@ env:
   depth_max_m: 5.0
   goal_tol_m: 0.25
   max_episode_steps: 500
+  # --- discrete action interface (Habitat PointNav convention) ---
+  # When true, (v, omega) is mapped to one of
+  # {move_forward, turn_left, turn_right, stop} and executed via
+  # habitat_sim's atomic action API, avoiding the per-step navmesh-snapback
+  # collision inflation that dominates the continuous-velocity path on
+  # 3D-scanned rooms. See bev_vawa/envs/habitat_env.py::_step_discrete.
+  discrete_actions: true
+  discrete_forward_m: 0.25
+  discrete_turn_deg: 10.0
+  # --- semantic sensor (optional; HM3D-v0.2 has panoptic annotations,
+  # Gibson 4+ does not; leave false for Gibson 4+) ---
+  use_semantic: false
+  semantic_classes: 16
 
 # channels_enabled gates (occ, free, goal_prior) at lift time so the
 # occupancy-only ablation (gibson_occonly.yaml) is a config-only change.
@@ -33,6 +46,14 @@ bev:
   depth_max_m: 5.0
   channels_enabled: [1, 1, 1]
   goal_sector_sigma_rad: 0.35
+  # Semantic branch gate. When true the encoder builds a parallel
+  # one-hot-semantic CNN alongside the BEV branch and concatenates its
+  # feature vector before goal fusion. Requires env.use_semantic=true
+  # and schema-v3 shards. Gibson 4+ lacks semantic annotations, so
+  # keep this false on that track.
+  use_semantic: false
+  semantic_classes: 16
+  semantic_feat_dim: 64
 
 wa:
   rollout_horizon: 3
@@ -42,6 +63,10 @@ wa:
   enable_deadend: true
   lambda_dyn: 0.5
   lambda_deadend: 0.5
+  # Learned short-horizon collision head (replaces reactive safety on
+  # narrow indoor scenes where depth-only percentile rules saturate).
+  enable_coll_head: true
+  lambda_coll_head: 0.3
 
 fusion:
   alpha: 1.0
@@ -49,6 +74,7 @@ fusion:
   gamma: 2.5
   delta: 0.5
   eta:   1.0            # dead-end penalty weight in fuse_scores
+  mu:    1.5            # learned-collision penalty weight in fuse_scores
 
 train:
   batch_size: 128

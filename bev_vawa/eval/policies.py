@@ -217,13 +217,23 @@ def make_astar_policy(room: RoomSpec, cfg: dict):
 
 
 def make_model_policy(model, device, cfg: dict, use_wa: bool = True):
-    """Wrap a trained BEVVAWA in a (v, omega) callable."""
+    """Wrap a trained BEVVAWA in a (v, omega) callable.
+
+    Automatically forwards the ``semantic`` observation when (a) the env
+    produces one and (b) the model was built with ``bev.use_semantic=True``.
+    Gracefully no-ops on depth-only setups so the same wrapper works on
+    PIB-Nav, Gibson-without-semantic, and HM3D-with-semantic.
+    """
     model.eval()
+    expects_semantic = bool(cfg.get("bev", {}).get("use_semantic", False))
     def policy(obs, cfg):
         depth = torch.from_numpy(obs["depth"]).to(device).unsqueeze(0).unsqueeze(0) / cfg["env"]["depth_max_m"]
         goal = torch.from_numpy(obs["goal_vec"]).to(device).unsqueeze(0)
+        sem_tensor = None
+        if expects_semantic and "semantic" in obs:
+            sem_tensor = torch.from_numpy(obs["semantic"]).to(device).long().unsqueeze(0)
         with torch.no_grad():
-            out = model(depth, goal, use_wa=use_wa)
+            out = model(depth, goal, use_wa=use_wa, semantic=sem_tensor)
             wp, k = model.select_waypoint(out)
         wp_rf = wp[0].cpu().numpy()
         return pure_pursuit_cmd(wp_rf, cfg["env"]["max_lin_vel"], cfg["env"]["max_ang_vel"])

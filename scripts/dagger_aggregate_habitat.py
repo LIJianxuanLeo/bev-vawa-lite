@@ -129,7 +129,7 @@ def _emit_samples_from_rollout(
         fg_stack = np.stack([obs_buffer[i + 1 + tau]["goal"]
                              for tau in range(H)]).astype(np.float32)
 
-        samples.append({
+        sample_out = {
             "depth": obs_buffer[i]["depth"].astype(np.float32),
             "goal": obs_buffer[i]["goal"].astype(np.float32),
             "pose": obs_buffer[i]["pose"].astype(np.float32),
@@ -141,7 +141,19 @@ def _emit_samples_from_rollout(
             "best_k": int(best_k),
             "future_depth": fd_stack,
             "future_goal": fg_stack,
-        })
+        }
+        # Carry semantic fields through when the rollout buffer collected
+        # them (i.e. env was built with use_semantic=True).
+        if "semantic" in obs_buffer[i]:
+            sample_out["semantic"] = obs_buffer[i]["semantic"].astype(np.int8)
+            fut_sem_stack = np.stack([
+                obs_buffer[i + 1 + tau].get(
+                    "semantic", np.zeros_like(obs_buffer[i]["semantic"])
+                ).astype(np.int8)
+                for tau in range(H)
+            ])
+            sample_out["future_semantic"] = fut_sem_stack
+        samples.append(sample_out)
     return samples
 
 
@@ -168,6 +180,17 @@ def main():
                          "samples closer to the eval-time distribution when "
                          "safety is on).")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--beta", type=float, default=0.0,
+                    help="DAGger beta-schedule parameter. Each step, with "
+                         "probability beta, the aggregator takes one step "
+                         "along the pathfinder's expert path (teleport) "
+                         "INSTEAD OF the policy's predicted action. "
+                         "beta=1.0 -> pure teleport expert (equivalent to "
+                         "rollout_habitat.generate_one_gibson_scene). "
+                         "beta=0.0 -> pure policy rollout (original DAGger-1 "
+                         "behaviour). Recommended schedule: 0.8 -> 0.4 -> 0 "
+                         "across three iterations to smoothly transition "
+                         "from on-policy-like to off-policy DAGger.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -239,32 +262,85 @@ def main():
             env.n_steps = 0
             obs = env._get_obs()
 
-            # Roll out the policy
+            # Roll out the policy, optionally mixing in expert teleport
+            # steps with probability beta (DAGger β-schedule).
             obs_buffer: list[dict] = []
             reached = False
             for step_i in range(args.max_steps_per_episode):
-                obs_buffer.append({
+                obs_snapshot = {
                     "depth": obs["depth"].copy(),
                     "goal": obs["goal_vec"].copy(),
                     "pose": obs["pose"].copy(),
-                })
+                }
+                if "semantic" in obs:
+                    obs_snapshot["semantic"] = obs["semantic"].copy()
+                obs_buffer.append(obs_snapshot)
+
+                use_expert = args.beta > 0.0 and rng.random() < args.beta
+
+                if use_expert:
+                    # Query shortest path from current position, teleport
+                    # one step along it. If no path, fall through to policy.
+                    px, pz, _ = float(obs["pose"][0]), float(obs["pose"][1]), float(obs["pose"][2])
+                    cur_xyz = np.array([px, agent_height, pz], dtype=np.float32)
+                    sp = env.shortest_path(cur_xyz, goal_xyz)
+                    if sp is not None and len(sp.points) >= 2:
+                        # Step toward the next pathfinder waypoint (clipped
+                        # to at most 0.25 m for comparability with discrete
+                        # actions) and re-orient to face that direction.
+                        p0 = np.asarray(sp.points[0], dtype=np.float32)
+                        p1 = np.asarray(sp.points[1], dtype=np.float32)
+                        direction = p1 - p0
+                        d_norm = float(np.linalg.norm(direction[[0, 2]]))
+                        if d_norm > 1e-6:
+                            step_m = min(0.25, d_norm)
+                            ux = float(direction[0] / d_norm)
+                            uz = float(direction[2] / d_norm)
+                            new_xyz = np.array([
+                                px + ux * step_m, agent_height, pz + uz * step_m,
+                            ], dtype=np.float32)
+                            new_yaw = float(math.atan2(uz, ux))
+                            env.teleport_xyz(new_xyz, new_yaw)
+                            env.n_steps += 1
+                            obs = env._get_obs()
+                            goal_dist = float(obs["goal_vec"][0])
+                            if goal_dist < env.goal_tol:
+                                reached = True
+                                obs_snapshot2 = {
+                                    "depth": obs["depth"].copy(),
+                                    "goal": obs["goal_vec"].copy(),
+                                    "pose": obs["pose"].copy(),
+                                }
+                                if "semantic" in obs:
+                                    obs_snapshot2["semantic"] = obs["semantic"].copy()
+                                obs_buffer.append(obs_snapshot2)
+                                break
+                            continue
+                    # fall through if sp was None or degenerate
+
                 v, w = policy(obs, cfg)
                 step_out = env.step((v, w))
                 obs = step_out.obs
                 if step_out.info.get("reached", False):
                     reached = True
-                    obs_buffer.append({
+                    obs_snapshot2 = {
                         "depth": obs["depth"].copy(),
                         "goal": obs["goal_vec"].copy(),
                         "pose": obs["pose"].copy(),
-                    })
+                    }
+                    if "semantic" in obs:
+                        obs_snapshot2["semantic"] = obs["semantic"].copy()
+                    obs_buffer.append(obs_snapshot2)
                     break
                 if step_out.done:
-                    obs_buffer.append({
+                    obs_snapshot2 = {
                         "depth": obs["depth"].copy(),
                         "goal": obs["goal_vec"].copy(),
                         "pose": obs["pose"].copy(),
-                    })
+                    }
+                    if "semantic" in obs:
+                        obs_snapshot2["semantic"] = obs["semantic"].copy()
+                    obs_buffer.append(obs_snapshot2)
                     break
 
             total_rollouts += 1
@@ -296,8 +372,18 @@ def main():
             "anchors": anchors.astype(np.float32),
             "future_depth": np.stack([s["future_depth"] for s in scene_samples]),
             "future_goal": np.stack([s["future_goal"] for s in scene_samples]),
-            "schema_version": np.array(SHARD_SCHEMA_VERSION, dtype=np.int32),
         }
+        # Stamp schema v3 only when every sample in the scene had semantic
+        # (keeping NavShardDataset's all-or-nothing v3 detection happy).
+        all_have_semantic = all("semantic" in s for s in scene_samples)
+        if all_have_semantic:
+            shard["semantic"] = np.stack([s["semantic"] for s in scene_samples])
+            shard["future_semantic"] = np.stack(
+                [s["future_semantic"] for s in scene_samples]
+            )
+            shard["schema_version"] = np.array(3, dtype=np.int32)
+        else:
+            shard["schema_version"] = np.array(2, dtype=np.int32)
         out_path = os.path.join(args.out, f"dagger_{scene_name}.npz")
         np.savez_compressed(out_path, **shard)
         total_samples += len(scene_samples)

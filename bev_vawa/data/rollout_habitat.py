@@ -34,7 +34,11 @@ from .gibson_episodes import iter_episodes, resolve_scene_glb
 
 log = get_logger(__name__)
 
-SHARD_SCHEMA_VERSION = 2
+# Latest schema version the generator knows how to emit. The actual value
+# stamped into each shard is computed at write time: v3 iff the env provided
+# semantic frames, else v2. Downstream ``NavShardDataset`` dispatches on the
+# stamped value and gracefully falls back for older shards.
+SHARD_SCHEMA_VERSION = 3
 
 
 def _path_resample_xz(points: List[np.ndarray], step_m: float) -> np.ndarray:
@@ -301,7 +305,9 @@ def raise_if_no_habitat() -> None:
 
 
 def _future_depth_stack(env, path_xz: np.ndarray, origin_idx: int,
-                         step_ahead_m: float, H: int) -> tuple[np.ndarray, np.ndarray]:
+                         step_ahead_m: float, H: int,
+                         want_semantic: bool = False,
+                         ) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """Capture the next ``H`` depth frames along ``path_xz`` starting from
     ``origin_idx``. The agent is teleported forward by ``step_ahead_m`` per
     step, depth is rendered, then the agent is teleported back at the end.
@@ -311,10 +317,13 @@ def _future_depth_stack(env, path_xz: np.ndarray, origin_idx: int,
     future_depth : (H, H_im, W_im) float32 in metres
     future_goal  : (H, 2) float32 [distance, bearing] to the same scene goal
                    as the originating sample.
+    future_semantic : (H, H_im, W_im) int8 coarse semantic labels, or ``None``
+                   when the env does not produce a semantic sensor.
     """
     H_im, W_im = env.depth_wh[1], env.depth_wh[0]
     future_depth = np.zeros((H, H_im, W_im), dtype=np.float32)
     future_goal = np.zeros((H, 2), dtype=np.float32)
+    future_semantic = np.zeros((H, H_im, W_im), dtype=np.int8) if want_semantic else None
 
     # remember current pose so we can restore after the probe
     x0, z0, yaw0 = (
@@ -354,13 +363,15 @@ def _future_depth_stack(env, path_xz: np.ndarray, origin_idx: int,
         obs = env._get_obs()
         future_depth[τ] = obs["depth"].astype(np.float32)
         future_goal[τ] = obs["goal_vec"].astype(np.float32)
+        if future_semantic is not None and "semantic" in obs:
+            future_semantic[τ] = obs["semantic"].astype(np.int8)
 
     # restore original pose (matches the pre-probe sample)
     restore = habitat_sim.AgentState()
     restore.position = cur_pos
     restore.rotation = cur_rot
     env._agent.set_state(restore, reset_sensors=False)
-    return future_depth, future_goal
+    return future_depth, future_goal, future_semantic
 
 
 def generate_one_gibson_scene(
@@ -392,6 +403,11 @@ def generate_one_gibson_scene(
     pathfinder = env._sim.pathfinder
     agent_height = env.agent_height
 
+    # Detect whether the env is producing semantic frames. If it is (e.g.
+    # HM3D with semantic sensor registered), we collect them too and stamp
+    # schema_version=3; otherwise we stay on schema v2.
+    want_semantic = getattr(env, "_use_semantic", False)
+
     depths: list[np.ndarray] = []
     goals: list[np.ndarray] = []
     poses: list[np.ndarray] = []
@@ -402,6 +418,8 @@ def generate_one_gibson_scene(
     best_ks: list[int] = []
     fut_depths: list[np.ndarray] = []
     fut_goals: list[np.ndarray] = []
+    semantics: list[np.ndarray] = []
+    fut_semantics: list[np.ndarray] = []
 
     for ep in episodes:
         sp = env.shortest_path(
@@ -443,7 +461,10 @@ def generate_one_gibson_scene(
                 want_deadend=True, goal_y=gy,
             )
             best_k = best_k_for_expert(anchors, ewp)
-            fd, fg = _future_depth_stack(env, path_xz, int(i), step_m_future, H)
+            fd, fg, fsem = _future_depth_stack(
+                env, path_xz, int(i), step_m_future, H,
+                want_semantic=want_semantic,
+            )
 
             depths.append(obs["depth"].astype(np.float32))
             goals.append(obs["goal_vec"].astype(np.float32))
@@ -456,10 +477,14 @@ def generate_one_gibson_scene(
             best_ks.append(int(best_k))
             fut_depths.append(fd)
             fut_goals.append(fg)
+            if want_semantic and "semantic" in obs:
+                semantics.append(obs["semantic"].astype(np.int8))
+                if fsem is not None:
+                    fut_semantics.append(fsem)
 
     if not depths:
         return None
-    return {
+    shard = {
         "depth": np.stack(depths),
         "goal": np.stack(goals),
         "pose": np.stack(poses),
@@ -471,8 +496,21 @@ def generate_one_gibson_scene(
         "anchors": anchors.astype(np.float32),
         "future_depth": np.stack(fut_depths),
         "future_goal": np.stack(fut_goals),
-        "schema_version": np.array(SHARD_SCHEMA_VERSION, dtype=np.int32),
     }
+    has_semantic = (
+        want_semantic
+        and len(semantics) == len(depths)
+        and len(fut_semantics) == len(depths)
+    )
+    if has_semantic:
+        shard["semantic"] = np.stack(semantics)             # (N, H, W) int8
+        shard["future_semantic"] = np.stack(fut_semantics)  # (N, H_future, H, W) int8
+        shard["schema_version"] = np.array(3, dtype=np.int32)
+    else:
+        # Stay on v2 when semantic was not collected (Gibson without
+        # semantic, or HM3D with use_semantic=False).
+        shard["schema_version"] = np.array(2, dtype=np.int32)
+    return shard
 
 
 def generate_dataset_gibson(

@@ -33,16 +33,29 @@ def wa_loss_for_stage(cfg: dict, model: torch.nn.Module, out: dict, batch: dict,
     wa_cfg = cfg.get("wa", {})
     lam_dyn = float(wa_cfg.get("lambda_dyn", 0.5)) if wa_cfg.get("enable_dyn", True) else 0.0
     lam_dead = float(wa_cfg.get("lambda_deadend", 0.5)) if wa_cfg.get("enable_deadend", True) else 0.0
+    # Learned collision head weight. Default 0 keeps the loss bit-for-bit
+    # identical to the original v2 loss; set ``wa.lambda_coll_head: 0.3``
+    # and ``wa.enable_coll_head: true`` in the Gibson / HM3D config to
+    # activate the head. Stage C halves the weight like lam_dyn / lam_dead.
+    lam_coll_head = (
+        float(wa_cfg.get("lambda_coll_head", 0.0))
+        if wa_cfg.get("enable_coll_head", False) else 0.0
+    )
     if stage == "c":
         lam_dyn *= 0.4
         lam_dead *= 0.4
+        lam_coll_head *= 0.4
 
     z_gt_future: Optional[torch.Tensor] = None
     if lam_dyn > 0 and "future_depth" in batch and "future_goal" in batch:
         with torch.no_grad():
-            z_gt_future = model.encode_future(batch["future_depth"], batch["future_goal"])
+            z_gt_future = model.encode_future(
+                batch["future_depth"], batch["future_goal"],
+                future_semantic=batch.get("future_semantic"),
+            )
 
     return wa_loss(
         out, batch, z_gt_future=z_gt_future,
         lambda_dyn=lam_dyn, lambda_deadend=lam_dead,
+        lambda_coll_head=lam_coll_head,
     )

@@ -58,7 +58,10 @@ def train_stage_c(cfg: dict, data_dir: str, in_ckpt: str, out_ckpt: str,
         n_seen = 0
         for bi, batch in enumerate(dl):
             batch = _to_device(batch, device)
-            out = model(batch["depth"], batch["goal"], use_wa=True)
+            out = model(
+                batch["depth"], batch["goal"], use_wa=True,
+                semantic=batch.get("semantic"),
+            )
             la = va_loss(out, batch)
             lb = wa_loss_for_stage(cfg, model, out, batch, stage="c")
             loss = la["loss"] + lb["loss"]

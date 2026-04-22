@@ -43,23 +43,27 @@ def wa_loss(
     z_gt_future: Optional[torch.Tensor] = None,
     lambda_dyn: float = 0.5,
     lambda_deadend: float = 0.5,
+    lambda_coll_head: float = 0.0,
 ) -> dict:
-    """WA loss: risk + progress + ensemble + optional ``L_dyn`` + ``L_deadend``.
+    """WA loss: risk + progress + ensemble + optional ``L_dyn`` + ``L_deadend``
+    + optional learned collision head (``lambda_coll_head``).
 
     Parameters
     ----------
     out
         Forward output of ``BEVVAWA``. Must contain ``wa_risk_logit``,
-        ``wa_progress``, ``risk_ensemble`` and (for the new terms) ``z_hat``
-        ``(B, K, H, L)`` and ``deadend_logit`` ``(B, K)``.
+        ``wa_progress``, ``risk_ensemble`` and (for the extended terms)
+        ``z_hat`` ``(B, K, H, L)``, ``deadend_logit`` ``(B, K)``, and
+        ``coll_logit_learned`` ``(B, K)``.
     batch
         Dataloader sample. Must contain ``cand_collision``, ``cand_progress``,
         ``best_k``, and — when ``lambda_deadend > 0`` — ``cand_deadend``.
     z_gt_future
-        Ground-truth future encoder latents, shape ``(B, H, L)``. Produced by
-        ``BEVVAWA.encode_future(batch['future_depth'], batch['future_goal'])``
-        under ``torch.no_grad()`` in the Stage-B / Stage-C trainer. May be
-        ``None`` when ``lambda_dyn == 0`` (dynamics loss skipped).
+        Ground-truth future encoder latents, shape ``(B, H, L)``.
+    lambda_coll_head
+        Weight on the learned collision BCE. Default 0 keeps the loss
+        mathematically identical to the original WA loss; set to 0.3 on
+        the Gibson / HM3D track to activate the head.
     """
     risk_logit = out["wa_risk_logit"]
     progress = out["wa_progress"]
@@ -90,8 +94,20 @@ def wa_loss(
     else:
         l_deadend = risk_logit.new_zeros(())
 
-    total = l_risk + 0.5 * l_risk_ens + l_prog \
-        + lambda_dyn * l_dyn + lambda_deadend * l_deadend
+    # --- L_coll_head: learned collision-probability BCE ---------------------
+    if lambda_coll_head > 0 and "coll_logit_learned" in out:
+        l_coll_head = F.binary_cross_entropy_with_logits(
+            out["coll_logit_learned"], coll
+        )
+    else:
+        l_coll_head = risk_logit.new_zeros(())
+
+    total = (
+        l_risk + 0.5 * l_risk_ens + l_prog
+        + lambda_dyn * l_dyn
+        + lambda_deadend * l_deadend
+        + lambda_coll_head * l_coll_head
+    )
     return {
         "loss": total,
         "risk": l_risk.detach(),
@@ -99,4 +115,5 @@ def wa_loss(
         "prog": l_prog.detach(),
         "dyn": l_dyn.detach(),
         "deadend": l_deadend.detach(),
+        "coll_head": l_coll_head.detach(),
     }

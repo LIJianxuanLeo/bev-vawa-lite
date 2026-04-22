@@ -43,6 +43,9 @@ class BEVVAWA(nn.Module):
             bev_range=bev_range,
             channels_enabled=channels_enabled,
             goal_sector_sigma_rad=goal_sigma,
+            use_semantic=bool(bev.get("use_semantic", False)),
+            semantic_classes=int(bev.get("semantic_classes", 16)),
+            semantic_feat_dim=int(bev.get("semantic_feat_dim", 64)),
         )
         self.va = VAHead(latent_dim=bev["latent_dim"], n_candidates=va["n_candidates"])
         self.wa = WAHead(
@@ -65,8 +68,10 @@ class BEVVAWA(nn.Module):
         use_wa: bool = True,
         future_depth: Optional[torch.Tensor] = None,
         future_goal: Optional[torch.Tensor] = None,
+        semantic: Optional[torch.Tensor] = None,
+        future_semantic: Optional[torch.Tensor] = None,
     ) -> dict:
-        z = self.encoder(depth, goal)
+        z = self.encoder(depth, goal, semantic=semantic)
         va_out = self.va(z)
         B = z.shape[0]
         anchors = self.anchors.to(z.dtype).unsqueeze(0).expand(B, -1, -1)
@@ -84,14 +89,18 @@ class BEVVAWA(nn.Module):
                 "risk_ensemble": wa_out["risk_ensemble"],
                 "z_hat": wa_out["z_hat"],
                 "deadend_logit": wa_out["deadend_logit"],
+                "coll_logit_learned": wa_out["coll_logit_learned"],
             })
         if future_depth is not None and future_goal is not None:
-            out["z_gt_future"] = self.encode_future(future_depth, future_goal)
+            out["z_gt_future"] = self.encode_future(
+                future_depth, future_goal, future_semantic=future_semantic
+            )
         return out
 
     @torch.no_grad()
     def encode_future(self, future_depth: torch.Tensor,
-                      future_goal: torch.Tensor) -> torch.Tensor:
+                      future_goal: torch.Tensor,
+                      future_semantic: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Run the encoder (no-grad) on each future step to produce the
         dynamics target for the WA ``L_dyn`` loss.
 
@@ -99,6 +108,9 @@ class BEVVAWA(nn.Module):
         ----------
         future_depth : (B, H, 1, Hi, Wi)
         future_goal  : (B, H, 2)
+        future_semantic : (B, H, Hi, Wi) int  *or*  (B, H, C, Hi, Wi) one-hot
+                         optional; passed only when the encoder was built
+                         with ``use_semantic=True``.
 
         Returns
         -------
@@ -108,7 +120,14 @@ class BEVVAWA(nn.Module):
         B, H, _, Hi, Wi = future_depth.shape
         flat_d = future_depth.reshape(B * H, 1, Hi, Wi)
         flat_g = future_goal.reshape(B * H, 2)
-        z = self.encoder.encode_single(flat_d, flat_g)       # (B*H, latent)
+        flat_s = None
+        if future_semantic is not None:
+            if future_semantic.dim() == 4:       # (B, H, Hi, Wi) int map
+                flat_s = future_semantic.reshape(B * H, Hi, Wi)
+            elif future_semantic.dim() == 5:     # (B, H, C, Hi, Wi) one-hot
+                C = future_semantic.shape[2]
+                flat_s = future_semantic.reshape(B * H, C, Hi, Wi)
+        z = self.encoder.encode_single(flat_d, flat_g, semantic=flat_s)  # (B*H, latent)
         return z.view(B, H, -1)
 
     # ------------------------------------------------------------------
@@ -116,12 +135,15 @@ class BEVVAWA(nn.Module):
                         ) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = fusion_cfg or self.cfg["fusion"]
         eta = float(cfg.get("eta", 1.0))
+        mu = float(cfg.get("mu", 0.0))
+        coll_logit = out.get("coll_logit_learned")
         if "wa_risk_logit" in out and "deadend_logit" in out:
             Q = fuse_scores(
                 out["va_logits"], out["wa_risk_logit"], out["wa_progress"],
                 out["wa_unc"], out["deadend_logit"],
                 alpha=cfg["alpha"], beta=cfg["beta"], gamma=cfg["gamma"],
                 delta=cfg["delta"], eta=eta,
+                coll_logit_learned=coll_logit, mu=mu,
             )
         elif "wa_risk_logit" in out:
             # WA was run without the dead-end branch — fall back to zero dead-end
@@ -131,6 +153,7 @@ class BEVVAWA(nn.Module):
                 out["wa_unc"], zero_dead,
                 alpha=cfg["alpha"], beta=cfg["beta"], gamma=cfg["gamma"],
                 delta=cfg["delta"], eta=0.0,
+                coll_logit_learned=coll_logit, mu=mu,
             )
         else:
             Q = out["va_logits"]

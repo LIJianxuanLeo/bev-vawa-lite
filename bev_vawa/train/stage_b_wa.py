@@ -45,7 +45,10 @@ def train_stage_b(cfg: dict, data_dir: str, in_ckpt: str, out_ckpt: str,
         n_seen = 0
         for bi, batch in enumerate(dl):
             batch = _to_device(batch, device)
-            out = model(batch["depth"], batch["goal"], use_wa=True)
+            out = model(
+                batch["depth"], batch["goal"], use_wa=True,
+                semantic=batch.get("semantic"),
+            )
             loss = wa_loss_for_stage(cfg, model, out, batch, stage="b")
             opt.zero_grad(set_to_none=True)
             loss["loss"].backward()

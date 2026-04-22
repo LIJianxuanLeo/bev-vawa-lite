@@ -12,8 +12,16 @@
 #   /root/data/datasets/pointnav/gibson/v2/...      # episodes
 #   conda env `habitat` with hsim 0.3.3 + project installed
 #
-# Usage:  bash scripts/run_dagger_iteration.sh [iter_tag]
+# Usage:  bash scripts/run_dagger_iteration.sh [iter_tag] [beta]
 #   iter_tag defaults to "iter1" — pass e.g. "iter2" to chain rounds.
+#   beta defaults to 0.0 — pure policy rollout (original DAGger-1). Use a
+#        schedule like 0.8 → 0.4 → 0.0 across three chained iterations to
+#        smoothly transition from teleport-expert-like to off-policy DAGger.
+#
+# Environment overrides:
+#   CKPT_IN        — source checkpoint for the rollout policy (default:
+#                    /root/data/runs/gibson/stage_c.pt). Pass the previous
+#                    iteration's Stage-C ckpt when chaining.
 #
 # Total runtime: ~90 min (mostly the aggregation rollout) → ~¥2.8.
 
@@ -23,6 +31,7 @@ export PYTHONPATH=$PWD
 HP=/root/miniconda3/envs/habitat/bin
 
 ITER="${1:-iter1}"
+BETA="${2:-0.0}"
 CKPT_IN="${CKPT_IN:-/root/data/runs/gibson/stage_c.pt}"
 
 DAGGER_DIR="/root/data/gibson_dagger_shards/${ITER}"
@@ -32,10 +41,11 @@ RUN_DIR="/root/data/runs/gibson_dagger_${ITER}"
 # ------------------------------------------------------------------
 # 1. Aggregate closed-loop samples, pathfinder-relabelled
 # ------------------------------------------------------------------
-echo "==== STEP 1: DAGger aggregation (${ITER}) ==== $(date)"
+echo "==== STEP 1: DAGger aggregation (${ITER}, beta=${BETA}) ==== $(date)"
 $HP/python scripts/dagger_aggregate_habitat.py \
     --config configs/habitat/gibson.yaml \
     --ckpt "$CKPT_IN" \
+    --beta "$BETA" \
     --scene-dir /root/data/scene_datasets/gibson \
     --episode-dir /root/data/datasets/pointnav/gibson/v2 \
     --split train \

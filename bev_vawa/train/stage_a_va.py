@@ -45,7 +45,10 @@ def train_stage_a(cfg: dict, data_dir: str, out_ckpt: str, epochs: int | None = 
         n_seen = 0
         for bi, batch in enumerate(dl):
             batch = _batch_to_device(batch, device)
-            out = model(batch["depth"], batch["goal"], use_wa=False)
+            out = model(
+                batch["depth"], batch["goal"], use_wa=False,
+                semantic=batch.get("semantic"),
+            )
             loss = va_loss(out, batch)
             opt.zero_grad(set_to_none=True)
             loss["loss"].backward()

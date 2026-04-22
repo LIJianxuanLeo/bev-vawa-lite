@@ -33,10 +33,16 @@ class BEVEncoder(nn.Module):
         bev_range: Sequence[float] = (0.0, 3.0, -1.5, 1.5),
         channels_enabled: Sequence[int] = (1, 1, 1),
         goal_sector_sigma_rad: float = 0.35,
+        use_semantic: bool = False,
+        semantic_classes: int = 16,
+        semantic_feat_dim: int = 64,
     ) -> None:
         super().__init__()
         self.latent_dim = int(latent_dim)
         self.grid_size = int(grid_size)
+        self.use_semantic = bool(use_semantic)
+        self.semantic_classes = int(semantic_classes)
+        self.semantic_feat_dim = int(semantic_feat_dim)
         self.lift = GeometryLift(
             grid_size=grid_size,
             bev_range=bev_range,
@@ -57,9 +63,27 @@ class BEVEncoder(nn.Module):
         )
         self.fc_pool = nn.Linear(c3 * 8 * 8, latent_dim)
 
+        # Optional semantic branch: small parallel CNN over one-hot semantic
+        # label map, pooled to a feat vector, concatenated to the depth
+        # latent before goal fusion. Disabled when ``use_semantic=False``
+        # so Stage-C checkpoints trained on depth-only shards keep working
+        # bit-for-bit.
+        if self.use_semantic:
+            self.sem_cnn = nn.Sequential(
+                nn.Conv2d(semantic_classes, 32, 5, stride=2, padding=2), nn.ReLU(inplace=True),  # /2
+                nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.ReLU(inplace=True),                # /4
+                nn.AdaptiveAvgPool2d((4, 4)),
+                nn.Flatten(),
+                nn.Linear(64 * 4 * 4, semantic_feat_dim),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            self.sem_cnn = None
+
         self.recurrent_type = recurrent
         goal_dim = 2
-        self.input_proj = nn.Linear(latent_dim + goal_dim, latent_dim)
+        sem_dim = self.semantic_feat_dim if self.use_semantic else 0
+        self.input_proj = nn.Linear(latent_dim + goal_dim + sem_dim, latent_dim)
         if recurrent == "lstm":
             self.rnn = nn.LSTMCell(latent_dim, latent_dim)
         elif recurrent == "gru":
@@ -67,21 +91,47 @@ class BEVEncoder(nn.Module):
         else:
             self.rnn = None
 
-    def encode_single(self, depth: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+    # ------------------------------------------------------------------
+    #  Semantic helper: accept either int label map (B, H, W) or pre-made
+    #  one-hot (B, C, H, W). Returns (B, C, H, W) one-hot in floating dtype.
+    # ------------------------------------------------------------------
+    def _semantic_to_onehot(self, semantic: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        if semantic.dim() == 3:
+            # (B, H, W) int map → one-hot (B, C, H, W)
+            semantic = semantic.long().clamp(0, self.semantic_classes - 1)
+            oh = F.one_hot(semantic, num_classes=self.semantic_classes)
+            oh = oh.permute(0, 3, 1, 2).contiguous().to(ref.dtype)
+            return oh
+        return semantic.to(ref.dtype)
+
+    def encode_single(self, depth: torch.Tensor, goal: torch.Tensor,
+                      semantic: "torch.Tensor | None" = None) -> torch.Tensor:
         bev = self.lift(depth, goal)                       # (B, 3, G, G)
         f = self.bev_cnn(bev)
         z = self.bev_pool(f).flatten(1)
         z = self.fc_pool(z)
-        fused = self.input_proj(torch.cat([z, goal], dim=-1))
+        if self.use_semantic:
+            if semantic is None:
+                # Silent fallback: if the dataset stops providing semantic
+                # (e.g. cross-eval on a non-HM3D scene), use zeros.
+                B = depth.shape[0]
+                sem_feat = depth.new_zeros(B, self.semantic_feat_dim)
+            else:
+                sem_oh = self._semantic_to_onehot(semantic, depth)
+                sem_feat = self.sem_cnn(sem_oh)
+            fused = self.input_proj(torch.cat([z, goal, sem_feat], dim=-1))
+        else:
+            fused = self.input_proj(torch.cat([z, goal], dim=-1))
         return F.relu(fused)
 
     def forward_seq(self, depth_seq: torch.Tensor, goal_seq: torch.Tensor,
-                    hidden=None) -> tuple[torch.Tensor, tuple]:
+                    hidden=None, semantic_seq=None) -> tuple[torch.Tensor, tuple]:
         B, T = depth_seq.shape[:2]
         outs = []
         if self.rnn is None:
             for t in range(T):
-                outs.append(self.encode_single(depth_seq[:, t], goal_seq[:, t]))
+                sem_t = None if semantic_seq is None else semantic_seq[:, t]
+                outs.append(self.encode_single(depth_seq[:, t], goal_seq[:, t], sem_t))
             return torch.stack(outs, dim=1), None
         if hidden is None:
             if isinstance(self.rnn, nn.LSTMCell):
@@ -92,7 +142,8 @@ class BEVEncoder(nn.Module):
         else:
             h = hidden
         for t in range(T):
-            x = self.encode_single(depth_seq[:, t], goal_seq[:, t])
+            sem_t = None if semantic_seq is None else semantic_seq[:, t]
+            x = self.encode_single(depth_seq[:, t], goal_seq[:, t], sem_t)
             if isinstance(self.rnn, nn.LSTMCell):
                 h = self.rnn(x, h)
                 outs.append(h[0])
@@ -101,5 +152,6 @@ class BEVEncoder(nn.Module):
                 outs.append(h)
         return torch.stack(outs, dim=1), h
 
-    def forward(self, depth: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
-        return self.encode_single(depth, goal)
+    def forward(self, depth: torch.Tensor, goal: torch.Tensor,
+                semantic: "torch.Tensor | None" = None) -> torch.Tensor:
+        return self.encode_single(depth, goal, semantic)

@@ -10,7 +10,14 @@ From the final rollout hidden state we predict:
   * a **collision-risk** logit (plus an M-member ensemble for uncertainty),
   * a scalar **progress** regression target,
   * a **dead-end** logit (reachability), trained via BCE against offline
-    pathfinder labels.
+    pathfinder labels,
+  * a **learned collision-probability** logit (``collision_head``), which
+    replaces the reactive safety wrapper on datasets where depth-only
+    percentile rules saturate (e.g.\\ narrow 3D-scanned corridors). The
+    head is supervised by the existing ``cand_collision`` label and
+    enters fusion through a new ``mu`` coefficient; see ``losses.wa_loss``
+    and ``models.fusion.fuse_scores`` for the training and inference
+    wiring respectively.
 """
 from __future__ import annotations
 import torch
@@ -31,6 +38,7 @@ class WAHead(nn.Module):
         self.H = rollout_horizon
         self.ensemble_n = ensemble
         self.latent_dim = latent_dim
+        self.waypoint_embed_dim = waypoint_embed_dim
 
         self.anchor_embed = nn.Sequential(
             nn.Linear(2, waypoint_embed_dim), nn.ReLU(inplace=True),
@@ -40,6 +48,15 @@ class WAHead(nn.Module):
         self.progress_head = nn.Linear(latent_dim, 1)
         self.risk_ensemble = nn.ModuleList([nn.Linear(latent_dim, 1) for _ in range(ensemble)])
         self.deadend_head = nn.Linear(latent_dim, 1)
+
+        # Learned short-horizon collision head.
+        # Input: final rollout hidden (L) + anchor embedding (E) concatenated,
+        # so the network sees "where am I going" as well as "latent state".
+        self.collision_head = nn.Sequential(
+            nn.Linear(latent_dim + waypoint_embed_dim, 64), nn.ReLU(inplace=True),
+            nn.Linear(64, 32), nn.ReLU(inplace=True),
+            nn.Linear(32, 1),
+        )
 
     def forward(self, z: torch.Tensor, anchors: torch.Tensor) -> dict:
         """z: (B, latent). anchors: (B, K, 2).
@@ -76,6 +93,10 @@ class WAHead(nn.Module):
         risk_mean = risks.mean(dim=0)
         unc = risks.sigmoid().var(dim=0)
 
+        # Learned collision prob per candidate: concat latent + anchor embed.
+        coll_input = torch.cat([h_final, anchor_emb], dim=-1)    # (B, K, L+E)
+        coll_logit = self.collision_head(coll_input).squeeze(-1)  # (B, K)
+
         return {
             "risk_logit": risk_mean,
             "progress": progress,
@@ -83,4 +104,5 @@ class WAHead(nn.Module):
             "risk_ensemble": risks,
             "z_hat": z_hat,
             "deadend_logit": deadend_logit,
+            "coll_logit_learned": coll_logit,
         }
