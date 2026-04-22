@@ -1,0 +1,6 @@
+component,mean_ms,std_ms,throughput_hz,description
+BEV Encoder,0.7361,0.0872,1358.5,depth + goal -> z (128-dim shared state)
+VA Head (fast),0.0182,0.0018,54899.9,z -> K logits + K offsets
+WA Head (slow),0.1724,0.0142,5801.5,z -> K*H latent rollouts; risk/progress/unc/dead/coll
+Fusion + select,0.0151,0.0027,66188.4,analytic Q_k = alpha*s + beta*p - ... -> argmax_k
+Total (end-to-end),1.1545,0.4121,866.1,one complete forward pass
