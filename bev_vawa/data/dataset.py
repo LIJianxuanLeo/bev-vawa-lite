@@ -8,10 +8,22 @@ from torch.utils.data import Dataset
 
 
 def list_shards(data_dir: str) -> List[Path]:
-    """List shards produced by either the MuJoCo rollout (``room_*.npz``) or
-    the Habitat rollout (``scene_*.npz``)."""
+    """List shards produced by any of the rollout sources:
+
+    - ``room_*.npz``   — MuJoCo / PIB-Nav rollout
+    - ``scene_*.npz``  — Habitat / Gibson teleport-expert rollout
+    - ``dagger_*.npz`` — DAGger closed-loop aggregation (see
+      ``scripts/dagger_aggregate_habitat.py``)
+
+    Also follows symlinks, so a "mix" directory that symlinks shards from
+    several sources will load them all in one ``NavShardDataset``.
+    """
     d = Path(data_dir)
-    return sorted(list(d.glob("room_*.npz")) + list(d.glob("scene_*.npz")))
+    return sorted(
+        list(d.glob("room_*.npz"))
+        + list(d.glob("scene_*.npz"))
+        + list(d.glob("dagger_*.npz"))
+    )
 
 
 class NavShardDataset(Dataset):

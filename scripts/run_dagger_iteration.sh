@@ -49,8 +49,12 @@ $HP/python scripts/dagger_aggregate_habitat.py \
 echo "==== STEP 2: Mix shards ==== $(date)"
 mkdir -p "$MIX_DIR"
 rm -f "$MIX_DIR"/*.npz
+# Preserve scene_*.npz naming so NavShardDataset's list_shards globber
+# (`scene_*.npz` and `dagger_*.npz`) catches everything. Teleport shards
+# are already named scene_<scene>.npz; we link them unchanged. DAGger
+# shards are named dagger_<scene>.npz in the aggregator; also matched.
 for f in /root/data/gibson_pointnav_v2_shards/train/*.npz; do
-    ln -sf "$f" "$MIX_DIR/tele_$(basename "$f")"
+    ln -sf "$f" "$MIX_DIR/$(basename "$f")"
 done
 for f in "$DAGGER_DIR"/*.npz; do
     ln -sf "$f" "$MIX_DIR/$(basename "$f")"
