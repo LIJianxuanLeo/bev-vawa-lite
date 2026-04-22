@@ -293,19 +293,48 @@ authority. This is a direct instantiation of the covariance-shift
 framing in §6.4: both the learned policy *and* the reactive safety
 module implicitly assume the state distribution they were developed on.
 
-**What is needed to close the gap** (in engineering-difficulty order):
+**Two remediation attempts, both null.** We ran the two standard
+fixes and measured at the same 4 seeds × 100 episodes:
 
-1. **Gibson-tuned reactive safety** — empirically confirmed necessary
-   (table above). Minimum viable fix: a small grid sweep over
-   `warn_m, near_m, side_warn_m` re-centred on Gibson corridor width
-   (~1.5 m), no retraining. Expected cost: ~4 parameter points × 7 min
-   ≈ 30 min and <¥1 of GPU billing.
-2. **Closed-loop DAGger aggregation** — run the partially-trained
-   policy against Habitat, record visited states, query the pathfinder
-   for the correct waypoint, fold augmented trajectories back into
-   Stage-B/C shards. Canonical fix for covariance shift.
-3. **Optional Stage-D PPO fine-tune** — heaviest option; only if DAGger
-   alone is insufficient.
+| Method | SR (no safety) | SR (+ safety) | paired ΔSR |
+|---|---|---|---|
+| Baseline (pure teleport training)          | 0.005 ± 0.006 | 0.013 ± 0.015 | +0.008 ± 0.009 |
+| Safety sweep (best of 4 variants)          | — | 0.013 ± 0.015 | +0.008 ± 0.009 |
+| DAGger-1 (teleport ∪ policy rollout)        | 0.003 ± 0.004 | 0.013 ± 0.008 | +0.010 ± 0.008 |
+| **(ref.) PIB-Nav main track**               | **0.40 ± 0.05** | **0.49 ± 0.05** | **+0.093 ± 0.013** |
+
+**Mechanistic reading.** The safety sweep exposes an *architectural*
+information insufficiency: in 1.0–1.8 m Gibson corridors the
+forward-arc and side-sector clearances are simultaneously near-
+saturated, so the lateral correction term
+`(clr_R − clr_L)·gain` vanishes regardless of the gain scalar.
+Tightening the thresholds only makes the velocity taper bite harder;
+the 3 non-default variants degrade to the no-safety baseline 0.005 SR.
+
+DAGger-1 additionally shows that a *single* aggregation round over a
+policy with near-zero reach rate produces mostly early-rollout states
+(agents pinned against walls within a few steps), whose pathfinder-
+relabelled waypoints are dominated by "turn back" instructions that
+raise the Stage-B WA loss by +183% without changing the closed-loop
+reach distribution. The canonical DAGger remedy requires 5–10
+iterations with a β-schedule; first-round regression is a known
+phenomenon.
+
+**What this validates and what is still needed.** The three null
+results validate §6.4: imitation-only policy training plus a
+post-hoc reactive wrapper is insufficient when the target
+distribution is geometrically out-of-sample. Realistic remaining
+options, in ascending engineering cost:
+
+1. **DAGger with N ≥ 5 iterations** + β-schedule (~2 h GPU per
+   iteration; ~10–20 h to convergence).
+2. **Residual PPO Stage-D fine-tune** on the Habitat
+   geodesic-progress reward.
+3. **Architectural replacement** of the reactive safety layer with
+   a learned short-horizon collision-avoidance module conditioned
+   on the BEV latent.
+
+We leave all three to follow-up work.
 
 **Artefacts.** Independent of the scientific question, this run produced
 three merged-to-`main` codebase improvements: an 80× training-throughput

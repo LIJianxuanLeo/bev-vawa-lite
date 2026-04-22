@@ -1,0 +1,17 @@
+method,SR,SPL,CollisionRate,PathLenRatio,LatencyMs
+BEV-VAWA Gibson safety=default seed=12345 +safety,0.0,0.0,1.0,nan,4.102877457525086
+BEV-VAWA Gibson safety=default seed=42 +safety,0.03,0.028665054336583326,1.0,1.0367710562844865,2.9817486185808066
+BEV-VAWA Gibson safety=default seed=7 +safety,0.0,0.0,1.0,nan,2.930432500148395
+BEV-VAWA Gibson safety=default seed=31337 +safety,0.02,0.01965015417142762,0.99,1.0030538278362584,2.9383049688303093
+BEV-VAWA Gibson safety=tight seed=12345 +safety,0.0,0.0,1.0,nan,3.0324995373796706
+BEV-VAWA Gibson safety=tight seed=42 +safety,0.01,0.01,1.0,0.9666434939617796,3.035870222317323
+BEV-VAWA Gibson safety=tight seed=7 +safety,0.0,0.0,1.0,nan,3.0094946906242317
+BEV-VAWA Gibson safety=tight seed=31337 +safety,0.01,0.01,0.99,0.9733927393151272,3.040230325028387
+BEV-VAWA Gibson safety=tighter seed=12345 +safety,0.0,0.0,1.0,nan,3.0940570335785083
+BEV-VAWA Gibson safety=tighter seed=42 +safety,0.01,0.01,1.0,0.9666434939617796,2.9942233420841347
+BEV-VAWA Gibson safety=tighter seed=7 +safety,0.0,0.0,1.0,nan,3.1134883963149322
+BEV-VAWA Gibson safety=tighter seed=31337 +safety,0.01,0.01,0.99,0.9733927393151272,3.178093006377131
+BEV-VAWA Gibson safety=sideheavy seed=12345 +safety,0.0,0.0,1.0,nan,3.1470889704123652
+BEV-VAWA Gibson safety=sideheavy seed=42 +safety,0.01,0.01,1.0,0.9666434939617796,2.9780062375818352
+BEV-VAWA Gibson safety=sideheavy seed=7 +safety,0.0,0.0,1.0,nan,2.9129561701736293
+BEV-VAWA Gibson safety=sideheavy seed=31337 +safety,0.01,0.01,0.99,0.9733927393151272,2.9218531341587597
