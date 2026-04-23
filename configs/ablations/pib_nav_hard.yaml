@@ -1,0 +1,23 @@
+# Cross-distribution eval config — generates a harder PIB-Nav
+# distribution than the training set to test whether BEV's geometric
+# inductive bias (metric invariance, explicit occupancy) transfers
+# better than the flat encoder under distribution shift.
+#
+# Relative to configs/default.yaml:
+#   room_size_m     [5.0, 7.0]  ->  [7.0, 10.0]    larger rooms
+#   n_obstacles     [3, 6]      ->  [6, 10]        more clutter
+#   obstacle_size_m [0.4, 1.2]  ->  [0.25, 1.4]    includes thinner/narrower
+#                                                   obstacles (harder to
+#                                                   resolve at grid_size=64)
+#
+# Everything else is unchanged — same model input resolution, same
+# depth range, same velocity limits, same control dt. This isolates
+# the scene-geometry shift.
+inherit: ../default.yaml
+env:
+  room_size_m: [7.0, 10.0]
+  n_obstacles: [6, 10]
+  obstacle_size_m: [0.25, 1.4]
+
+data:
+  out_dir: "data/pib_nav_hard"

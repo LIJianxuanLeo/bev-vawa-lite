@@ -1,0 +1,4 @@
+# BEV channel ablation: remove free-space channel.
+inherit: ../default.yaml
+bev:
+  channels_enabled: [1, 0, 1]   # occ, free, goal-prior

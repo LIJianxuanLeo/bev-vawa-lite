@@ -1,0 +1,9 @@
+# BEV channel ablation: remove goal-prior channel.
+# The goal-prior encodes the goal bearing as a Gaussian sector map;
+# removing it forces the goal information to propagate only through
+# the ``input_proj(cat[z, goal])`` step later in the encoder. If this
+# variant keeps SR, it means the spatial goal injection isn't the
+# load-bearing part of BEV.
+inherit: ../default.yaml
+bev:
+  channels_enabled: [1, 1, 0]   # occ, free, goal-prior

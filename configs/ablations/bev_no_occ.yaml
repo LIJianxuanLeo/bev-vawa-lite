@@ -1,0 +1,6 @@
+# BEV channel ablation: remove occupancy channel.
+# Leave-one-out to test whether the occupancy channel is functionally
+# necessary. Baseline full BEV uses [1,1,1]; this variant uses [0,1,1].
+inherit: ../default.yaml
+bev:
+  channels_enabled: [0, 1, 1]   # occ, free, goal-prior

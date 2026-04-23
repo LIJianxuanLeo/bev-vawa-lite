@@ -1,0 +1,7 @@
+encoder,probe_target,metric,value
+BEV,nearest_obstacle_polar,R^2,0.3159
+BEV,forward_lane_navigability,accuracy,1.0000
+BEV,goal_angle_bin12,accuracy,0.8471
+flat,nearest_obstacle_polar,R^2,0.4471
+flat,forward_lane_navigability,accuracy,1.0000
+flat,goal_angle_bin12,accuracy,0.7451
