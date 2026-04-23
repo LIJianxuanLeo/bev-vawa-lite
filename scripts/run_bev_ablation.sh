@@ -52,10 +52,14 @@ for SEED in 12345 42 7 31337; do
         --results "$RESULTS"
 
     echo "==== flat-encoder seed=$SEED: eval (+ safety) ===="
+    # Explicit +safety suffix because scripts/eval.py (the PIB-Nav
+    # evaluator) does NOT auto-append the flag to --method-name, unlike
+    # scripts/eval_habitat.py. Without a distinct name, the +safety row
+    # would overwrite the no-safety row in the CSV (same method key).
     python scripts/eval.py --config "$CFG" \
         --policy bev_vawa --ckpt "$RUN_DIR/stage_c.pt" \
         --n-episodes 100 --seed $SEED \
-        --method-name "Flat Encoder seed=$SEED" --safety \
+        --method-name "Flat Encoder seed=$SEED +safety" --safety \
         --results "$RESULTS"
 done
 
