@@ -1,0 +1,7 @@
+encoder,probe_target,metric,value
+BEV,quadrant_medians,R^2,-0.8086
+BEV,wall_ahead,accuracy,0.9435
+BEV,asymmetry,accuracy,0.6787
+flat,quadrant_medians,R^2,-0.1922
+flat,wall_ahead,accuracy,0.9446
+flat,asymmetry,accuracy,0.7460
