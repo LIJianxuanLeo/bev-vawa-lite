@@ -1,0 +1,9 @@
+# Cross-distribution eval for the Flat (pooled-depth) encoder control.
+# Needed because run_bev_A_B_pod.sh originally used pib_nav_hard.yaml for
+# all variants in the hard-dist loop, which caused a size-mismatch error
+# when loading the Flat (1-channel) checkpoint into a BEV-style model.
+inherit: ./flat_encoder.yaml
+env:
+  room_size_m: [7.0, 10.0]
+  n_obstacles: [6, 10]
+  obstacle_size_m: [0.25, 1.4]

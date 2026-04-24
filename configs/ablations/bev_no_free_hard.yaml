@@ -1,0 +1,6 @@
+# Cross-distribution eval for the BEV-no_free variant.
+inherit: ./bev_no_free.yaml
+env:
+  room_size_m: [7.0, 10.0]
+  n_obstacles: [6, 10]
+  obstacle_size_m: [0.25, 1.4]

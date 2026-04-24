@@ -85,12 +85,18 @@ FLAT_DIR=/root/data/runs/bev_ablation_pod/flat
 [ -f "$BEV_DIR/stage_c.pt" ] || { echo "MISSING: $BEV_DIR/stage_c.pt — train it first"; exit 1; }
 [ -f "$FLAT_DIR/stage_c.pt" ] || { echo "MISSING: $FLAT_DIR/stage_c.pt — train it first"; exit 1; }
 
+# Each variant declares (TAG, DEFAULT_CFG, HARD_CFG, CKPT_DIR). The hard
+# configs are per-variant composites (inherit from the variant's default
+# config + override env block) so the model architecture in the hard-dist
+# eval matches the checkpoint. Using a single pib_nav_hard.yaml for all
+# variants would crash on Flat / channel-ablation ckpts whose first conv
+# layer has a different in-channel count than the default BEV model.
 VARIANTS=(
-    "BEV-full:configs/default.yaml:$BEV_DIR"
-    "Flat:configs/ablations/flat_encoder.yaml:$FLAT_DIR"
-    "BEV-no_occ:configs/ablations/bev_no_occ.yaml:$RUNS_ROOT/no_occ"
-    "BEV-no_free:configs/ablations/bev_no_free.yaml:$RUNS_ROOT/no_free"
-    "BEV-no_goal:configs/ablations/bev_no_goal.yaml:$RUNS_ROOT/no_goal"
+    "BEV-full:configs/default.yaml:configs/ablations/pib_nav_hard.yaml:$BEV_DIR"
+    "Flat:configs/ablations/flat_encoder.yaml:configs/ablations/flat_encoder_hard.yaml:$FLAT_DIR"
+    "BEV-no_occ:configs/ablations/bev_no_occ.yaml:configs/ablations/bev_no_occ_hard.yaml:$RUNS_ROOT/no_occ"
+    "BEV-no_free:configs/ablations/bev_no_free.yaml:configs/ablations/bev_no_free_hard.yaml:$RUNS_ROOT/no_free"
+    "BEV-no_goal:configs/ablations/bev_no_goal.yaml:configs/ablations/bev_no_goal_hard.yaml:$RUNS_ROOT/no_goal"
 )
 
 eval_variant_on_dist () {
@@ -109,25 +115,16 @@ eval_variant_on_dist () {
 
 echo "==== STEP 2: EVAL ALL VARIANTS x 2 distributions ====" "$(date)"
 
-# (a) original / default distribution — sampled via NavEnv using
-#     configs/default.yaml's env block.
+# (a) original / default distribution — each variant uses its own config.
+# (b) hard distribution — each variant uses its own *_hard.yaml composite.
 for VAR in "${VARIANTS[@]}"; do
-    TAG="${VAR%%:*}"; REST="${VAR#*:}"
-    CFG="${REST%%:*}"; CKPT_DIR="${REST##*:}"
-    eval_variant_on_dist "$TAG" "$CFG" "$CKPT_DIR/stage_c.pt" "default"
+    IFS=: read -r TAG DCFG HCFG CKPT_DIR <<< "$VAR"
+    eval_variant_on_dist "$TAG" "$DCFG" "$CKPT_DIR/stage_c.pt" "default"
 done
 
-# (b) hard distribution — eval with the hard config so NavEnv samples
-#     7-10m rooms with 6-10 obstacles. Model config stays same.
-# NOTE: we use the hard config only for env sampling; the model
-# architecture is determined by the checkpoint and doesn't change.
 for VAR in "${VARIANTS[@]}"; do
-    TAG="${VAR%%:*}"; REST="${VAR#*:}"
-    # For cross-dist eval, pass pib_nav_hard.yaml as the config (env settings
-    # differ, model settings inherit from default.yaml so are unchanged).
-    CKPT_DIR="${REST##*:}"
-    eval_variant_on_dist "$TAG" configs/ablations/pib_nav_hard.yaml \
-        "$CKPT_DIR/stage_c.pt" "hard"
+    IFS=: read -r TAG DCFG HCFG CKPT_DIR <<< "$VAR"
+    eval_variant_on_dist "$TAG" "$HCFG" "$CKPT_DIR/stage_c.pt" "hard"
 done
 
 echo "==== ALL DONE ====" "$(date)"
